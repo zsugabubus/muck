@@ -1,0 +1,70 @@
+#!/usr/bin/awk -f
+# SYNOPSIS $0 [PLAYLIST-ADD]... [-- [PLAYLIST-UPDATE]... [-- [PLAYLIST-FILTER]...]]
+#
+# Create a new M3U8 playlist by merging files (and their metadata) from
+# PLAYLIST-ADD and PLAYLIST-UPDATE playlists.
+#
+# Playlists are processed in order.
+#
+# PLAYLIST-UPDATE only updates metadata for already recorded files. Thus if a
+# file is only present in PLAYLIST-UPDATE but not in PLAYLIST-ADD, then the
+# final playlist will not contain it.
+
+BEGIN {
+	delete playlist[0]
+
+	add = ARGC;
+	filter = ARGC;
+	for (argi = 1; argi < ARGC; ++argi) {
+		if (ARGV[argi] == "--") {
+			if (add == ARGC)
+				add = argi;
+			else if (filter == ARG)
+				filter = argi;
+			else
+				printf "\033[1;35m'--' treated as filename\033[m\n" > "/dev/tty"
+			delete ARGV[argi--];
+			--ARGC
+		}
+	}
+}
+
+FNR == 1 {
+	extinf = ""
+	++IN
+
+	if ("#EXTM3U8" == $0)
+		next
+}
+
+/^#EXTINF:/ {
+	extinf = $0
+	next
+}
+
+/^#/ {
+	printf "\033[;1m%s:%d: \033[1;35munknown comment: %s\033[m\n", FILENAME, FNR, $0 > "/dev/tty"
+	status=2
+}
+
+{
+	if (IN < add || $0 in playlist)
+		playlist[$0] = extinf
+	extinf = ""
+}
+
+END {
+	print "#EXTM3U8"
+
+	# GNU Awk extension. Though order is not really important, a sorted
+	# output looks prettier.
+	PROCINFO["sorted_in"] = "@val_str_asc"
+
+	for (file in playlist) {
+		if (playlist[file] != "")
+			print playlist[file]
+		print file
+	}
+
+	exit status
+}

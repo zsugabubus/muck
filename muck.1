@@ -1,0 +1,245 @@
+.TH MUCK "1" "August 2021"
+.SH NAME
+muck \- music player
+.
+.SH SYNOPSIS
+.
+.RB muck
+.RI  [ OPTION ]...
+.RI  [ URL ]...
+.
+.SH DESCRIPTION
+.B muck
+is a minimal music player built on top of FFmpeg. It is written in C, so that's
+where it name comes from: mu-C-k player.
+.
+.PP
+When
+.IR URL s
+are given, they are used to populate
+.B master
+playlist. Otherwise a special
+.B stdin
+playlist is created and the playlist file is read from the standard input.
+.
+.SS Playlists
+.PP
+Files ending in
+.RB {\  .m3u " | " .m3u8 " | " .pl " }[ " .bz " | " .bz2 " | " .gz " | " .lz4 " | " .xz " | " .zst \ ]
+are treated as (compressed) playlist files.
+.PP
+If file starts with
+.BR #EXTM3U
+it is recognized as an M3U playlist and for every media URL metadata is
+written to and read from
+.BR #EXTINF \ directive.
+Playlists containing unknown comments are marked read-only thus never
+overwritten.
+.PP
+.BI #PLAYLIST: NAME
+directive can be used to provide a pretty name for a playlist instead of
+referencing to it by its path.
+.PP
+Playlists are opened only once, immediately after startup and may be nested
+without limits.
+.PP
+Directories are treated like a virtual playlist with the limitation that they
+are recognized on the command-line only, i.e. they are neither scanned
+recursively nor can be played from a playlist. If you would like to overcome
+this limitation, use
+.BR "find | muck" .
+.
+.SS "Cover art"
+When
+.RB $ MUCK_HOME/cover
+exists, the cover art of currently playing file is written
+to it.
+.PP
+Note that it can be a symbolic link (e.g. \[->] /tmp/cover), just be aware that
+some image viewers can detect file time changes on their real path only.
+.
+.SH OPTIONS
+.TP
+.BI \-c\  COMMANDS
+Execute
+.I COMMANDS
+after startup.
+.
+.TP
+.BI \-C\  COMMANDS
+Execute
+.I COMMANDS
+before startup.
+.
+.TP
+.B \-d
+Print debug information.
+.
+.TP
+.BI \-l\  LEVEL
+Set FFmpeg log level, where
+.I LEVEL
+is quiet \[->] {-8..56..8} \[->] extremely verbose. (Default: 16 (errors))
+.
+.TP
+.BI \-o\  FORMAT
+Name of output format.
+.
+.TP
+.BI \-w
+Allow writing
+.B user.play_count
+and
+.B user.skip_count
+extended attributes.
+.
+.SH USAGE
+.SS Keybindings
+.TP
+.BR 0-9 ,\ \-
+Set
+.IR N x
+for next command.
+.
+.TP
+.BR p ,\  N
+Seek to
+.IR Nn "-th (default: 1)"
+previous file.
+.
+.TP
+.BR n
+Seek to
+.IR Nn -th
+next file. (Default seek command at startup.)
+.
+.TP
+.BR s
+Seek to
+.IR Ns "\-th (default: 0) file."
+.
+.TP
+.BR r
+Seek to a random file.
+.
+.TP
+.BR Return
+Seek again.
+.
+.TP
+.BR g
+Seek to
+.IR Ng " (default: 0)"
+seconds.
+.
+.TP
+.BR G
+Seek to
+.IR NG "% (default: 1/\[*F]\[S2]\[~=]3/8=37.5%)"
+in the file.
+.
+.TP
+.BR h ,\  l
+Seek by 5 seconds.
+.
+.TP
+.BR j ,\  k
+Seek by 5% but at least 5 seconds.
+.
+.TP
+.BR .
+Pause playback.
+.
+.TP
+.BR > ,\  c
+Unpause playback.
+.
+.TP
+.B Space
+Toggle pause playback.
+.
+.TP
+.B i
+Print information about currently playing file.
+.
+.TP
+.BR w here
+Print files around currently playing file.
+.
+.TP
+.BR I ,\  W
+Toggle automatic
+.BR i " or " w
+whenever seeking in playlist.
+.
+.TP
+.B m
+Print detailed metadata information about currently playing.
+.
+.TP
+.BR f ,\  / ,\  =
+Search.
+.IP
+Detailed manual is part of the search screen.
+.
+.TP
+.B S
+Print statistics.
+.
+.TP
+.BR Z ,\  Q ,\  q
+Quit.
+.
+.TP
+.BR Escape
+Ignore.
+.
+.TP
+(other printable character)
+Execute
+.RB $ MUCK_HOME/{KEY} .
+.IP
+.RB $ MUCK_ *
+environment variables are set, based on the currently playing file.
+.
+.SH ENVIRONMENT
+.TP
+.B EDITOR
+Editor to use for text-editing operations.
+.
+.TP
+.B MUCK_HOME
+Configuration root directory.
+.IP
+Always set for executed programs.
+.IP
+Default:
+.RB $ HOME /.config/muck.
+.
+.SH EXAMPLE
+.
+Read files from arguments:
+.EX
+$ muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
+.EE
+.
+.PP
+.
+Read playlist file from standard input:
+.EX
+$ muck <<"PLAYLIST"
+#EXTM3U
+#EXTINF:title="foobar",
+# This is my favourite song:
+i-scream.flac
+http://online-screams.com:8008/radio
+~/mus
+~/Music
+PLAYLIST
+.EE
+.
+.SH AUTHORS
+Written by zsugabubus.
+.
+.SH LICENSE
+GPLv3+

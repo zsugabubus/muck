@@ -1,0 +1,3 @@
+#!/usr/bin/sh
+playlist=${1:-playlist.m3u}
+find \( -false $(printf ' -o -name *.%s' mp0 mp3 flac wav alac mkv) \) -fprintf '%p\n'

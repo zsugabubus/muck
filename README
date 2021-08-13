@@ -1,0 +1,153 @@
+MUCK(1)                     General Commands Manual                    MUCK(1)
+
+
+
+NAME
+       muck - music player
+
+SYNOPSIS
+       muck [OPTION]...  [URL]...
+
+DESCRIPTION
+       muck is a minimal music player built on top of FFmpeg. It is written in
+       C, so that's where it name comes from: mu-C-k player.
+
+       When URLs are given, they are used to populate master playlist.  Other‐
+       wise  a special stdin playlist is created and the playlist file is read
+       from the standard input.
+
+   Playlists
+       Files ending in { .m3u | .m3u8 | .pl }[ .bz | .bz2 | .gz | .lz4 | .xz |
+       .zst ] are treated as (compressed) playlist files.
+
+       If file starts with #EXTM3U it is recognized as an M3U playlist and for
+       every media URL metadata is written to and read from #EXTINF directive.
+       Playlists  containing  unknown comments are marked read-only thus never
+       overwritten.
+
+       #PLAYLIST:NAME directive can be used to provide a  pretty  name  for  a
+       playlist instead of referencing to it by its path.
+
+       Playlists  are  opened  only once, immediately after startup and may be
+       nested without limits.
+
+       Directories are treated like a virtual  playlist  with  the  limitation
+       that  they  are recognized on the command-line only, i.e. they are nei‐
+       ther scanned recursively nor can be played  from  a  playlist.  If  you
+       would like to overcome this limitation, use find | muck.
+
+   Cover art
+       When  $MUCK_HOME/cover  exists, the cover art of currently playing file
+       is written to it.
+
+       Note that it can be a symbolic link (e.g. → /tmp/cover), just be  aware
+       that some image viewers can detect file time changes on their real path
+       only.
+
+OPTIONS
+       -c COMMANDS
+              Execute COMMANDS after startup.
+
+       -C COMMANDS
+              Execute COMMANDS before startup.
+
+       -d     Print debug information.
+
+       -l LEVEL
+              Set FFmpeg log level, where LEVEL is quiet → {-8..56..8}  →  ex‐
+              tremely verbose. (Default: 16 (errors))
+
+       -o FORMAT
+              Name of output format.
+
+       -w     Allow  writing  user.play_count and user.skip_count extended at‐
+              tributes.
+
+USAGE
+   Keybindings
+       0-9, - Set Nx for next command.
+
+       p, N   Seek to Nn-th (default: 1) previous file.
+
+       n      Seek to Nn-th next file. (Default seek command at startup.)
+
+       s      Seek to Ns-th (default: 0) file.
+
+       r      Seek to a random file.
+
+       Return Seek again.
+
+       g      Seek to Ng (default: 0) seconds.
+
+       G      Seek to NG% (default: 1/Φ²≈3/8=37.5%) in the file.
+
+       h, l   Seek by 5 seconds.
+
+       j, k   Seek by 5% but at least 5 seconds.
+
+       .      Pause playback.
+
+       >, c   Unpause playback.
+
+       Space  Toggle pause playback.
+
+       i      Print information about currently playing file.
+
+       where  Print files around currently playing file.
+
+       I, W   Toggle automatic i or w whenever seeking in playlist.
+
+       m      Print detailed metadata information about currently playing.
+
+       f, /, =
+              Search.
+
+              Detailed manual is part of the search screen.
+
+       S      Print statistics.
+
+       Z, Q, q
+              Quit.
+
+       Escape Ignore.
+
+       (other printable character)
+              Execute $MUCK_HOME/{KEY}.
+
+              $MUCK_* environment variables are set, based  on  the  currently
+              playing file.
+
+ENVIRONMENT
+       EDITOR Editor to use for text-editing operations.
+
+       MUCK_HOME
+              Configuration root directory.
+
+              Always set for executed programs.
+
+              Default: $HOME/.config/muck.
+
+EXAMPLE
+       Read files from arguments:
+       $ muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
+
+       Read playlist file from standard input:
+       $ muck <<"PLAYLIST"
+       #EXTM3U
+       #EXTINF:title="foobar",
+       # This is my favourite song:
+       i-scream.flac
+       http://online-screams.com:8008/radio
+       ~/mus
+       ~/Music
+       PLAYLIST
+
+AUTHORS
+       Written by zsugabubus.
+
+LICENSE
+       GPLv3+
+
+
+
+                                  August 2021                          MUCK(1)
