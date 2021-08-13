@@ -3012,10 +3012,7 @@ do_cleanup(void)
 	swr_free(&cur_in.resampler);
 
 	fputs(CR, tty);
-	fflush(tty);
-
-	if (stderr != tty)
-		fclose(tty);
+	fclose(tty);
 }
 
 static void
@@ -3810,12 +3807,12 @@ log_cb(void *ctx, int level, const char *format, va_list ap)
 int
 main(int argc, char **argv)
 {
-	atexit(do_cleanup);
-
 	if (!(tty = fopen(ctermid(NULL), "w+e"))) {
 		fprintf(stderr, "Cannot connect to TTY\n");
 		return EXIT_FAILURE;
 	}
+
+	atexit(do_cleanup);
 
 	save_tty();
 	setup_tty();
