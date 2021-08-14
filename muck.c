@@ -1211,7 +1211,7 @@ sanitize_metadata(File *f)
 	}
 }
 
-static int
+static void
 read_metadata(Input const *in)
 {
 	typedef struct {
@@ -1241,15 +1241,15 @@ read_metadata(Input const *in)
 
 	};
 
-	in->pf.p->modified = 1;
-
 	AVDictionary const *m = in->s.format_ctx->metadata;
+	Playlist *playlist = in->pf.p;
+	File *f = in->pf.f;
 
 	File tmpf;
 	char file_data[UINT16_MAX];
 
 	/* Begin file data with its URL. */
-	size_t url_size = strlen(in->pf.f->a.url) + 1 /* NUL */;
+	size_t url_size = strlen(f->a.url) + 1 /* NUL */;
 	size_t file_data_size = url_size;
 
 	for (enum Metadata m = 0; m < M_NB; ++m)
@@ -1260,8 +1260,8 @@ read_metadata(Input const *in)
 	if (AV_NOPTS_VALUE != duration) {
 		if (UINT16_MAX < file_data_size + (1 + 20 + 1)) {
 		fail_too_long:
-			errno = ENOSPC;
-			return -1;
+			print_file_error(playlist, &f->a, "Too much metadata", NULL);
+			return;
 		}
 
 		tmpf.metadata[M_duration] = file_data_size;
@@ -1333,10 +1333,8 @@ read_metadata(Input const *in)
 					}
 				}
 
-				if (err) {
-					errno = EINVAL;
-					print_file_strerror(in->pf.p, &in->pf.f->a, "Metadata contains control character");
-				}
+				if (err)
+					print_file_strerror(playlist, &f->a, "Metadata contains control character");
 
 				while (' ' == dest[-1])
 					--dest;
@@ -1357,20 +1355,30 @@ read_metadata(Input const *in)
 	    read_xattr(in, &tmpf, file_data, &file_data_size, XATTR_TAGS, M_tags) < 0)
 		goto fail_too_long;
 
+	if (!playlist->modified) {
+		for (enum Metadata m = 0; m < M_NB; ++m)
+			if (!!tmpf.metadata[m] != !!f->metadata[m] ||
+			    (tmpf.metadata[m] &&
+			     strcmp(file_data + tmpf.metadata[m], f->a.url + f->metadata[m])))
+				goto changed;
+		return;
+	changed:
+	}
+
 	void *p;
 	if (!(p = malloc(file_data_size)))
-		return -1;
+		goto fail_too_long;
 
-	memcpy(p, in->pf.f->a.url, url_size);
+	playlist->modified = 1;
+
+	memcpy(p, f->a.url, url_size);
 	memcpy(p + url_size, file_data + url_size, file_data_size - url_size);
 
-	free(in->pf.f->a.url);
-	in->pf.f->a.url = p;
+	free(f->a.url);
+	f->a.url = p;
 
-	memcpy(in->pf.f->metadata, tmpf.metadata, sizeof tmpf.metadata);
-	sanitize_metadata(in->pf.f);
-
-	return 0;
+	memcpy(f->metadata, tmpf.metadata, sizeof tmpf.metadata);
+	sanitize_metadata(f);
 }
 
 static char const *
