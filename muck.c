@@ -15,13 +15,13 @@
 #include <unistd.h>
 
 /* FFmpeg. */
-#include "libavcodec/avcodec.h"
-#include "libavdevice/avdevice.h"
-#include "libavformat/avformat.h"
-#include "libavformat/url.h"
-#include "libavutil/audio_fifo.h"
-#include "libavutil/frame.h"
-#include "libswresample/swresample.h"
+#include <libavcodec/avcodec.h>
+#include <libavdevice/avdevice.h>
+#include <libavformat/avformat.h>
+#include <libavformat/url.h>
+#include <libavutil/audio_fifo.h>
+#include <libavutil/frame.h>
+#include <libswresample/swresample.h>
 
 #include "config.h"
 
