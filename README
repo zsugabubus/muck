@@ -45,23 +45,39 @@ DESCRIPTION
        only.
 
 OPTIONS
-       -c COMMANDS
-              Execute COMMANDS after startup.
+       -x COMMAND
+              Execute COMMAND at startup.
 
-       -C COMMANDS
-              Execute COMMANDS before startup.
+              Default: s (begin playing from the first file).
 
-       -d     Print debug information.
+       -a FILTERGRAPH
+              Specify filtergraph to use. See ffplay(1) -af.
 
-       -l LEVEL
-              Set FFmpeg log level, where LEVEL is quiet → {-8..56..8}  →  ex‐
-              tremely verbose. (Default: 16 (errors))
+              Default: volume=replaygain=track.  Use anull to disable.
+
+       -c CODEC
+              Output codec.
+
+              Default: pcm (fake codec that uses sample format of input).
 
        -o FORMAT
-              Name of output format.
+              Output format.
 
-       -w     Allow  writing  user.play_count and user.skip_count extended at‐
+              Default: alsa.
+
+       -n FILENAME
+              Output filename.
+
+              Default: (none).
+
+       -m     Maximum demuxer buffer size in kB.
+
+              Default: 8192.
+
+       -w     Allow writing user.play_count and user.skip_count  extended  at‐
               tributes.
+
+       -d     Print debug information. Be very verbose when given twice.
 
 USAGE
    Keybindings
@@ -99,10 +115,14 @@ USAGE
 
        m      Print detailed metadata information about currently playing.
 
-       f, /, =
-              Search.
+       /, =   Search.
 
               Detailed manual is part of the search screen.
+
+       +, -   Change  volume  property of volume filter by +1% and -2% respec‐
+              tively.
+
+       *      Toggle mute. Uses volume filter.
 
        S      Print statistics.
 
@@ -111,7 +131,7 @@ USAGE
 
        Escape Ignore.
 
-       (other printable character)
+       (other letter)
               Execute $MUCK_HOME/{KEY}.
 
               $MUCK_* environment variables are set, based  on  the  currently
@@ -128,19 +148,24 @@ ENVIRONMENT
               Default: $HOME/.config/muck.
 
 EXAMPLE
-       Read files from arguments:
-       $ muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
+       •      Read files from arguments:
 
-       Read playlist file from standard input:
-       $ muck <<"PLAYLIST"
-       #EXTM3U
-       #EXTINF:title="foobar",
-       # This is my favourite song:
-       i-scream.flac
-       http://online-screams.com:8008/radio
-       ~/mus
-       ~/Music
-       PLAYLIST
+              $ muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
+
+       •      Read playlist file from standard input:
+
+              $ muck <<"PLAYLIST"
+              #EXTM3U
+              #EXTINF:title="foobar",
+              # This is my favourite song:
+              i-scream.flac
+              http://online-screams.com:8008/radio
+              ~/mus
+              ~/Music
+              PLAYLIST
+
+SEE ALSO
+       ffmpeg(1) ffplay(1) realpath(1)
 
 AUTHORS
        Written by zsugabubus.

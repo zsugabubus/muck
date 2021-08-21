@@ -15,7 +15,7 @@ cc = meson.get_compiler('c')
 
 ffmpeg_dir = meson.source_root() / 'ffmpeg'
 ffmpeg_link_args = []
-foreach lib: ['swresample', 'swscale', 'avcodec', 'avdevice', 'avformat', 'avutil']
+foreach lib: ['swresample', 'swscale', 'avcodec', 'avdevice', 'avformat', 'avutil', 'avfilter']
   ffmpeg_link_args += [
     '-L' + ffmpeg_dir / 'lib' + lib / '',
     '-l' + lib,
@@ -45,13 +45,17 @@ ffmpeg_dep = declare_dependency(
 config = configuration_data()
 foreach fn: [
   'pthread_setname_np',
-  'pthread_rwlockattr_setkind_np'
 ]
   config.set10('HAVE_' + fn.to_upper(), cc.has_function(
     fn,
     prefix: '#define _GNU_SOURCE\n#include <pthread.h>',
     dependencies: [dependency('threads')]
   ))
+endforeach
+foreach fn: [
+  '__builtin_expect'
+]
+  config.set10('HAVE_' + fn.to_upper(), cc.has_function(fn))
 endforeach
 configure_file(output: 'config.h', configuration: config)
 
@@ -63,7 +67,7 @@ cover = custom_target(
 )
 
 executable('muck',
-  'muck.c', cover,
+  'muck.c', 'rnd.c', cover,
   dependencies: [
     ffmpeg_dep,
   ],

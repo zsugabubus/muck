@@ -60,30 +60,55 @@ some image viewers can detect file time changes on their real path only.
 .
 .SH OPTIONS
 .TP
-.BI \-c\  COMMANDS
+.BI \-x\  COMMAND
 Execute
-.I COMMANDS
-after startup.
+.I COMMAND
+at startup.
+.IP
+Default:
+.B s
+(begin playing from the first file).
 .
 .TP
-.BI \-C\  COMMANDS
-Execute
-.I COMMANDS
-before startup.
+.BI \-a\  FILTERGRAPH
+Specify filtergraph to use. See
+.BR ffplay (1)
+.BR -af .
+.IP
+Default:
+.BR volume=replaygain=track .
+Use
+.B anull
+to disable.
 .
 .TP
-.B \-d
-Print debug information.
-.
-.TP
-.BI \-l\  LEVEL
-Set FFmpeg log level, where
-.I LEVEL
-is quiet \[->] {-8..56..8} \[->] extremely verbose. (Default: 16 (errors))
+.BI \-c\  CODEC
+Output codec.
+.IP
+Default:
+.B pcm
+(fake codec that uses sample format of input).
 .
 .TP
 .BI \-o\  FORMAT
-Name of output format.
+Output format.
+.IP
+Default:
+.BR alsa .
+.
+.TP
+.BI \-n\  FILENAME
+Output filename.
+.IP
+Default:
+(none).
+.
+.TP
+.BI \-m
+Maximum demuxer buffer size in kB.
+.IP
+Default:
+.BR 8192 .
 .
 .TP
 .BI \-w
@@ -92,6 +117,10 @@ Allow writing
 and
 .B user.skip_count
 extended attributes.
+.
+.TP
+.B \-d
+Print debug information. Be very verbose when given twice.
 .
 .SH USAGE
 .SS Keybindings
@@ -177,10 +206,22 @@ whenever seeking in playlist.
 Print detailed metadata information about currently playing.
 .
 .TP
-.BR f ,\  / ,\  =
+.BR / ,\  =
 Search.
 .IP
 Detailed manual is part of the search screen.
+.
+.TP
+.BR + ,\ \-
+Change volume property of
+.B volume
+filter by +1% and -2% respectively.
+.
+.TP
+.BR *
+Toggle mute. Uses
+.B volume
+filter.
 .
 .TP
 .B S
@@ -195,7 +236,7 @@ Quit.
 Ignore.
 .
 .TP
-(other printable character)
+(other letter)
 Execute
 .RB $ MUCK_HOME/{KEY} .
 .IP
@@ -218,14 +259,16 @@ Default:
 .
 .SH EXAMPLE
 .
+.IP \(bu
 Read files from arguments:
+.sp
 .EX
 $ muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
 .EE
 .
-.PP
-.
+.IP \(bu
 Read playlist file from standard input:
+.sp
 .EX
 $ muck <<"PLAYLIST"
 #EXTM3U
@@ -237,6 +280,11 @@ http://online-screams.com:8008/radio
 ~/Music
 PLAYLIST
 .EE
+.
+.SH "SEE ALSO"
+.BR ffmpeg (1)
+.BR ffplay (1)
+.BR realpath (1)
 .
 .SH AUTHORS
 Written by zsugabubus.
