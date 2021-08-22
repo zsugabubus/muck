@@ -2834,6 +2834,7 @@ seek_buffer(int64_t target_pts)
 		}
 
 		dropped_bytes += frame->pkt_size;
+		av_frame_unref(frame);
 	}
 
 	xassert(dropped_bytes <= atomic_fetch_sub_lax(&buffer_bytes, dropped_bytes));
@@ -3252,6 +3253,8 @@ sink_worker(void *arg)
 			av_log(out.format_ctx, AV_LOG_ERROR,
 					"Could not encode frame: %s\n",
 					av_err2str(rc));
+
+		av_frame_unref(frame);
 
 		/* Receive an encoded packet. */
 		while (0 <= (rc = avcodec_receive_packet(out.codec_ctx, pkt))) {
