@@ -1,5 +1,5 @@
 all :
-	ninja -C build
+	meson compile -C build
 
 bootstrap :
 	meson build
