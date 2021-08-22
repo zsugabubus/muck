@@ -1454,7 +1454,7 @@ update_cover(Input const *in)
 	close(fd);
 }
 
-static void
+static int
 open_input(Input *in)
 {
 	memset(&in->s, 0, sizeof in->s);
@@ -1471,7 +1471,7 @@ open_input(Input *in)
 	} else {
 		in->fd = open_file(playlist, &f->a);
 		if (in->fd < 0)
-			return;
+			return -1;
 		sprintf(urlbuf, "pipe:%d", in->fd);
 		url = urlbuf;
 	}
@@ -1482,7 +1482,7 @@ open_input(Input *in)
 	if (rc < 0) {
 		print_file_averror(playlist, &f->a,
 				"Could not open input stream", rc);
-		return;
+		return -1;
 	}
 
 	/* Get information on the input file (number of streams etc.). */
@@ -1520,7 +1520,7 @@ open_input(Input *in)
 
 	if (!in->s.audio) {
 		print_file_error(playlist, &f->a, "No audio streams found", NULL);
-		return;
+		return -1;
 	}
 
 #if 0
@@ -1536,13 +1536,13 @@ open_input(Input *in)
 	/* Find a decoder for the audio stream. */
 	if (!(codec = avcodec_find_decoder(in->s.audio->codecpar->codec_id))) {
 		print_file_error(playlist, &f->a, "Could not find decoder", NULL);
-		return;
+		return -1;
 	}
 
 	/* Allocate a new decoding context. */
 	if (!(in->s.codec_ctx = avcodec_alloc_context3(codec))) {
 		print_file_error(playlist, &f->a, "Could not allocate codec", NULL);
-		return;
+		return -1;
 	}
 
 	/* Initialize the stream parameters with demuxer information. */
@@ -1550,7 +1550,7 @@ open_input(Input *in)
 	if (rc < 0) {
 		print_file_averror(playlist, &f->a,
 				"Could not initalize codec parameters", rc);
-		return;
+		return -1;
 	}
 
 	in->s.codec_ctx->time_base = in->s.audio->time_base;
@@ -1558,10 +1558,11 @@ open_input(Input *in)
 	rc = avcodec_open2(in->s.codec_ctx, codec, NULL);
 	if (rc < 0) {
 		print_file_averror(playlist, &f->a, "Could not open codec", rc);
-		return;
+		return -1;
 	}
 
 	read_metadata(&in[0]);
+	return 0;
 }
 
 static void
@@ -2913,7 +2914,9 @@ source_worker(void *arg)
 				atomic_store_lax(&in0.pf.f, seek_file0);
 				seek_file0 = NULL;
 				in0.pf.p = get_parent(&master, &in0.pf.f->a);
-				open_input(&in0);
+
+				if (open_input(&in0) < 0)
+					write(control[1], (char const[]){ CONTROL('J') }, 1);
 
 				update_input_info();
 
@@ -3381,6 +3384,9 @@ play_file(File *f, int64_t pts)
 static void
 handle_sigwinch(int sig)
 {
+	if (!tty)
+		return;
+
 	(void)sig;
 
 	struct winsize w;
