@@ -276,6 +276,7 @@ typedef struct {
 	AVStream *cover_front;
 	PlaylistFile pf;
 	int fd; /**< -1 for F_URL. */
+	unsigned nb_audios;
 } Input;
 
 static int threads_inited;
@@ -289,6 +290,7 @@ static char const *ofilename = NULL;
 
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
+static unsigned _Atomic cur_track;
 
 static struct {
 	BirdLock lock;
@@ -353,6 +355,7 @@ static char *last_search;
 static char seek_cmd = 'n';
 static RndState rnd;
 static File *seek_file0;
+static int64_t _Atomic seek_file_pts = AV_NOPTS_VALUE;
 static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
 static int has_number;
@@ -1484,13 +1487,16 @@ open_input(Input *in)
 	in->cover_front = NULL;
 	in->s.audio = NULL;
 
+	unsigned nb_audios = 0;
+
 	for (unsigned i = 0; i < in->s.format_ctx->nb_streams; ++i) {
 		AVStream *stream = in->s.format_ctx->streams[i];
 
 		stream->discard = AVDISCARD_ALL;
 
 		if (AVMEDIA_TYPE_AUDIO == stream->codecpar->codec_type) {
-			in->s.audio = stream;
+			if (cur_track == nb_audios++)
+				in->s.audio = stream;
 			continue;
 		}
 
@@ -1505,6 +1511,8 @@ open_input(Input *in)
 			in->cover_front = stream;
 		}
 	}
+
+	atomic_store_lax(&in->nb_audios, nb_audios);
 
 	if (!in->s.audio) {
 		print_file_error(playlist, &f->a, "No audio streams found", NULL);
@@ -1833,9 +1841,8 @@ get_file_index(PlaylistFile pf)
 }
 
 static void
-print_file(PlaylistFile pf, FILE *stream)
+print_file(File const *f, FILE *stream)
 {
-	File const *f = pf.f;
 	char const *str;
 
 	flockfile(stream);
@@ -2207,7 +2214,7 @@ get_parent(Playlist *ancestor, AnyFile *a)
 }
 
 static PlaylistFile
-get_current_file(void)
+get_current_pf(void)
 {
 	PlaylistFile ret;
 	ret.f = atomic_load_lax(&in0.pf.f);
@@ -2266,7 +2273,12 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 
 	AnyFile const *a;
 	if (SEEK_CUR == whence) {
-		assert(cur);
+		PlaylistFile tmp;
+		if (!cur) {
+			tmp.f = atomic_load_lax(&in0.pf.f);
+			tmp.p = tmp.f ? get_parent(&master, &tmp.f->a) : NULL;
+			cur = &tmp;
+		}
 		playlist = cur->p;
 		a = cur->f ? &cur->f->a : &master.a;
 	} else {
@@ -2339,7 +2351,7 @@ search_file(Playlist *parent, Playlist *playlist, uint8_t filter_index, char con
 	struct timespec start;
 	xassert(!clock_gettime(CLOCK_MONOTONIC, &start));
 
-	PlaylistFile cur = get_current_file();
+	File const *cur = atomic_load_lax(&in0.pf.f);
 
 append:;
 	uint8_t unkeyed = 0;
@@ -2469,7 +2481,7 @@ append:;
 
 		/* No value. */
 		if (p == s) {
-			if (!cur.f) {
+			if (!cur) {
 				error_msg = "No file is playing";
 				goto cleanup;
 			}
@@ -2478,7 +2490,7 @@ append:;
 				enum MetadataX m = __builtin_ctz(mxs);
 				mxs ^= UINT64_C(1) << m;
 
-				p = cur.f->metadata[m] ? cur.f->a.url + cur.f->metadata[m] : "";
+				p = cur->metadata[m] ? cur->a.url + cur->metadata[m] : "";
 				while (*p && ';' != *p) {
 					switch (*p) {
 					case '(': case ')':
@@ -2610,9 +2622,18 @@ print_progress(int force)
 			duration / 60, (unsigned)(duration % 60),
 			duration ? (unsigned)(clock * 100 / duration) : 0);
 
-	int v = atomic_load_lax(&volume);
-	if (100 != v)
-		fprintf(tty, " Vol: % 3d%%", v);
+	{
+		unsigned k = atomic_load_lax(&cur_track) + 1,
+		         n = atomic_load_lax(&in0.nb_audios);
+		if (1 < (k | n))
+			fprintf(tty, " Track: %d/%d", k, n);
+	}
+
+	{
+		int v = atomic_load_lax(&volume);
+		if (100 != v)
+			fprintf(tty, " Vol: % 3d%%", v);
+	}
 
 	if (unlikely(AV_LOG_DEBUG <= av_log_get_level())) {
 		uint16_t len = atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head);
@@ -2769,7 +2790,7 @@ print_around(PlaylistFile pf)
 				from_offset ? 0 : 7,
 				from_offset ? labs(from_offset) : get_file_index(from));
 
-		print_file(from, tty);
+		print_file(from.f, tty);
 
 		if (to_lim <= 0 || from.f == to_stop.f)
 			break;
@@ -2890,18 +2911,22 @@ source_worker(void *arg)
 
 				update_input_info();
 
-				fputs(CR, tty);
-
 				if (atomic_load_lax(&auto_w))
 					print_around(in0.pf);
 				if (atomic_load_lax(&auto_i))
 					print_format();
 				print_now_playing();
-				print_file(in0.pf, tty);
+				print_file(in0.pf.f, tty);
+
+				print_progress(1);
+				if (tty)
+					fflush(tty);
 
 				update_cover(&in0);
 
 				seek_buffer(INT64_MIN);
+
+				atomic_store_lax(&seek_pts, seek_file_pts);
 
 				discont = 0; /* TODO: Eh... seek by user =>flush or automatic =>no flush? */
 			}
@@ -3049,7 +3074,8 @@ source_worker(void *arg)
 			}
 
 			print_progress(0);
-			fflush(tty);
+			if (tty)
+				fflush(tty);
 		} else if (AVERROR(EAGAIN) != rc)
 			av_log(in->s.format_ctx, AV_LOG_ERROR, "Could not decode frame: %s\n",
 					av_err2str(rc));
@@ -3325,9 +3351,11 @@ setup_tty(void)
 }
 
 static void
-play_file(PlaylistFile pf)
+play_file(File *f, int64_t pts)
 {
-	atomic_store_lax(&seek_file0, pf.f);
+	/* Mutex will acquire. */
+	atomic_store_lax(&seek_file_pts, pts);
+	atomic_store_lax(&seek_file0, f);
 
 	xassert(!pthread_mutex_lock(&buffer_lock));
 	xassert(!pthread_cond_broadcast(&buffer_wakeup));
@@ -3434,7 +3462,7 @@ open_visual_search(Playlist *parent, Playlist *playlist)
 
 	fprintf(stream, "%s\n\n", last_search ? last_search : "");
 
-	PlaylistFile cur = get_current_file();
+	PlaylistFile cur = get_current_pf();
 	for (enum MetadataX m = 0; m < MX_NB; ++m) {
 		char const *value = cur.f ? get_metadata(cur.p, cur.f, m) : NULL;
 		if (!value || !*value)
@@ -3663,7 +3691,7 @@ do_cmd(char c)
 		/* FALLTHROUGH */
 	case 'i': /* Information. */
 		print_format();
-		print_file(get_current_file(), tty);
+		print_file(atomic_load_lax(&in0.pf.f), tty);
 		break;
 
 	case 'm': /* Metadata. */
@@ -3674,7 +3702,7 @@ do_cmd(char c)
 		xassert(!rc);
 		int old_level = av_log_get_level();
 		av_log_set_level(AV_LOG_DEBUG);
-		av_dump_format(in0.s.format_ctx, 0, get_current_file().f->a.url, 0);
+		av_dump_format(in0.s.format_ctx, 0, atomic_load_lax(&in0.pf.f)->a.url, 0);
 		av_log_set_level(old_level);
 		xassert(!pthread_mutex_unlock(&file_lock));
 	}
@@ -3686,19 +3714,22 @@ do_cmd(char c)
 		break;
 
 	case 't': /* Tracks. */
-#if 0
-		if (cur_in.nb_audios) {
-			cur_audio_stream = (cur_audio_stream + 1) % cur_in.nb_audios;
-			play_file(pf);
+	{
+		unsigned n = atomic_load_lax(&in0.nb_audios);
+		if (n) {
+			atomic_store_lax(&cur_track, (cur_track + 1) % n);
+			play_file(atomic_load_lax(&in0.pf.f), atomic_load_lax(&cur_pts));
+		} else {
+			print_error("No audio tracks are found");
 		}
-#endif
+	}
 		break;
 
 	case '/':
 	case '=':
 		open_visual_search(NULL, &master);
 		if (live) {
-			PlaylistFile cur = get_current_file();
+			PlaylistFile cur = get_current_pf();
 			pf = seek_playlist(&master, &cur, 0, SEEK_CUR);
 			if (pf.f != cur.f)
 				goto play_file;
@@ -3739,16 +3770,14 @@ do_cmd(char c)
 	case 'r': /* Random. */
 	{
 		seek_cmd = c;
-		PlaylistFile cur = get_current_file();
-		pf = seek_playlist(&master, &cur, POS_RND, SEEK_SET);
+		pf = seek_playlist(&master, NULL, POS_RND, SEEK_SET);
 		goto play_file;
 	}
 
 	case 's': /* Set. */
 	{
 		static int64_t s_number = 0;
-		PlaylistFile cur = get_current_file();
-		pf = seek_playlist(&master, &cur, use_number(&s_number), SEEK_SET);
+		pf = seek_playlist(&master, NULL, use_number(&s_number), SEEK_SET);
 		goto play_file;
 	}
 
@@ -3758,13 +3787,11 @@ do_cmd(char c)
 	{
 		static int64_t n_number = 1;
 
-		PlaylistFile cur = get_current_file();
-
 		use_number(&n_number);
 		seek_cmd = c;
-		pf = seek_playlist(&master, &cur, 'n' == c ? n_number : -n_number, SEEK_CUR);
+		pf = seek_playlist(&master, NULL, 'n' == c ? n_number : -n_number, SEEK_CUR);
 	play_file:;
-		play_file(pf);
+		play_file(pf.f, AV_NOPTS_VALUE);
 	}
 		break;
 
@@ -3801,7 +3828,7 @@ do_cmd(char c)
 			break;
 		/* FALLTHROUGH */
 	case 'w': /* Where. */
-		print_around(get_current_file());
+		print_around(get_current_pf());
 		break;
 
 	case '.':
@@ -3841,7 +3868,7 @@ do_cmd(char c)
 		if (!(' ' <= (unsigned)c && (unsigned)c <= '~'))
 			break;
 
-		pf = get_current_file();
+		pf = get_current_pf();
 		struct timespec mtim_before = get_file_mtim(pf);
 
 		if (!spawn()) {
@@ -3881,7 +3908,7 @@ do_cmd(char c)
 		if (memcmp(&mtim_before, &mtim_after, sizeof mtim_before)) {
 			fprintf(tty, "Reloading changed file..."CR);
 			fflush(tty);
-			play_file(pf);
+			play_file(pf.f, atomic_load_lax(&cur_pts));
 		}
 	}
 		break;
@@ -4068,7 +4095,7 @@ main(int argc, char **argv)
 	if (startup_cmd)
 		do_cmd_str(startup_cmd);
 	else
-		play_file(seek_playlist(&master, NULL, 0, SEEK_SET));
+		play_file(seek_playlist(&master, NULL, 0, SEEK_SET).f, AV_NOPTS_VALUE);
 
 	/* TUI event loop. */
 	{
