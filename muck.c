@@ -352,7 +352,7 @@ static uint8_t cur_filter[2]; /**< .[live] is the currently used filter. */
 static atomic_uchar live = 1;
 static atomic_uchar auto_w, auto_i;
 
-static char *last_search;
+static char *search_history[10];
 
 static char seek_cmd = 'n';
 static RndState rnd;
@@ -3333,6 +3333,9 @@ do_cleanup(void)
 	do
 		av_frame_free(&buffer[i]);
 	while ((uint16_t)++i);
+
+	for (size_t i = 0; i < ARRAY_SIZE(search_history); ++i)
+		free(search_history[i]);
 #endif
 
 	fputs(CR, tty);
@@ -3471,7 +3474,9 @@ open_visual_search(Playlist *parent, Playlist *playlist)
 	if (!stream)
 		return;
 
-	fprintf(stream, "%s\n\n", last_search ? last_search : "");
+	for (size_t i = 0; i < ARRAY_SIZE(search_history) && search_history[i]; ++i)
+		fprintf(stream, "%s\n", search_history[i]);
+	fputc('\n', stream);
 
 	PlaylistFile cur = get_current_pf();
 	for (enum MetadataX m = 0; m < MX_NB; ++m) {
@@ -3588,10 +3593,27 @@ open_visual_search(Playlist *parent, Playlist *playlist)
 			if (0 < line_len && '\n' == line[line_len - 1])
 				line[line_len - 1] = '\0';
 
-			free(last_search);
-			last_search = line;
-			search_file(parent, playlist, 0, line);
-			/* free(line); */
+			char *carry = search_history[0];
+			search_history[0] = NULL;
+			for (size_t i = 1; i < ARRAY_SIZE(search_history) && carry; ++i) {
+				if (!strcmp(carry, line)) {
+					search_history[0] = carry;
+					carry = NULL;
+					break;
+				}
+
+				char *tmp = search_history[i];
+				search_history[i] = carry;
+				carry = tmp;
+			}
+			free(carry);
+
+			if (!search_history[0])
+				search_history[0] = line;
+			else
+				free(line);
+
+			search_file(search_history[0]);
 		}
 	}
 
