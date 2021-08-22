@@ -2341,7 +2341,7 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
  * @param s "(" [LETTER[<][>][!][=]EXPR]... " | " ")"
  */
 static void
-search_file(Playlist *parent, Playlist *playlist, uint8_t filter_index, char const *s)
+search_file(char const *s)
 {
 	Clause clauses[M_NB], *clause = clauses;
 	char buf[1 << 12];
@@ -2562,7 +2562,8 @@ append:;
 
 	fprintf(tty, "Searching for \e[1m%s\e[m..."LF, orig);
 
-	match_file(parent, &playlist->a, filter_index, clauses, clause - clauses);
+	uint8_t filter_index = 0;
+	match_file(NULL, &master.a, filter_index, clauses, clause - clauses);
 
 	struct timespec finish;
 	xassert(!clock_gettime(CLOCK_MONOTONIC, &finish));
@@ -3467,7 +3468,7 @@ open_tmpfile(char tmpname[PATH_MAX])
 }
 
 static void
-open_visual_search(Playlist *parent, Playlist *playlist)
+open_visual_search(void)
 {
 	char tmpname[PATH_MAX];
 	FILE *stream = open_tmpfile(tmpname);
@@ -3760,7 +3761,7 @@ do_cmd(char c)
 
 	case '/':
 	case '=':
-		open_visual_search(NULL, &master);
+		open_visual_search();
 		if (live) {
 			PlaylistFile cur = get_current_pf();
 			pf = seek_playlist(&master, &cur, 0, SEEK_CUR);
