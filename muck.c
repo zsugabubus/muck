@@ -3476,8 +3476,13 @@ open_visual_search(void)
 	if (!stream)
 		return;
 
-	for (size_t i = 0; i < ARRAY_SIZE(search_history) && search_history[i]; ++i)
+	int any = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(search_history) && search_history[i]; ++i) {
 		fprintf(stream, "%s\n", search_history[i]);
+		any = 1;
+	}
+	if (!any)
+		fputc('\n', stream);
 	fputc('\n', stream);
 
 	PlaylistFile cur = get_current_pf();
