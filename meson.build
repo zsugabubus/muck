@@ -57,6 +57,7 @@ foreach fn: [
 ]
   config.set10('HAVE_' + fn.to_upper(), cc.has_function(fn))
 endforeach
+config.set10('CONFIG_VALGRIND', get_option('buildtype').contains('debug'))
 configure_file(output: 'config.h', configuration: config)
 
 cover = custom_target(

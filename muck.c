@@ -279,9 +279,11 @@ typedef struct {
 	unsigned nb_audios;
 } Input;
 
-static int threads_inited;
 static pthread_t source_thread, sink_thread;
+#if CONFIG_VALGRIND
+static int threads_inited;
 static atomic_uchar ALIGNED_ATOMIC terminate;
+#endif
 static int control[2];
 
 static char const *ocodec = "pcm";
@@ -529,6 +531,7 @@ plumb_file(AnyFile const *a, uint8_t filter_index, FILE *stream)
 	plumb_file_(a, NULL, filter_index, stream);
 }
 
+#if CONFIG_VALGRIND
 static void
 cleanup_file(AnyFile *a)
 {
@@ -543,6 +546,7 @@ cleanup_file(AnyFile *a)
 		free(playlist->files);
 	}
 }
+#endif
 
 static void *
 append_file(Playlist *parent, enum FileType type)
@@ -2882,8 +2886,10 @@ source_worker(void *arg)
 	for (;;) {
 		int rc;
 
+#if CONFIG_VALGRIND
 		if (unlikely(atomic_load_lax(&terminate)))
 			goto terminate;
+#endif
 
 		if (unlikely(atomic_load_lax(&seek_file0))) {
 			xassert(!pthread_mutex_lock(&file_lock));
@@ -3122,8 +3128,10 @@ sink_worker(void *arg)
 	pars->time_base = (AVRational){ 1, 1 };
 
 	for (;;) {
+#if CONFIG_VALGRIND
 		if (unlikely(atomic_load_lax(&terminate)))
 			goto terminate;
+#endif
 
 		if (unlikely(atomic_load_lax(&paused))) {
 			if (!locked)
@@ -3188,10 +3196,12 @@ sink_worker(void *arg)
 			print_error("Playback suspended");
 
 			xassert(!pthread_mutex_lock(&buffer_lock));
+#if CONFIG_VALGRIND
 			if (unlikely(atomic_load_lax(&terminate))) {
 				locked = 1;
 				goto terminate;
 			}
+#endif
 			xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
 			xassert(!pthread_mutex_unlock(&buffer_lock));
 		}
@@ -3285,13 +3295,14 @@ do_cleanup(void)
 {
 	fputs("Saving playlists..."CR, tty);
 	fflush(tty);
+	xassert(!pthread_mutex_lock(&file_lock));
 	save_master();
+	xassert(!pthread_mutex_unlock(&file_lock));
 
-#ifndef NDEBUG
+#if CONFIG_VALGRIND
 	if (threads_inited) {
 		atomic_store_lax(&terminate, 1);
 		xassert(!pthread_mutex_lock(&buffer_lock));
-		terminate = 1;
 		xassert(!pthread_cond_broadcast(&buffer_wakeup));
 		xassert(!pthread_mutex_unlock(&buffer_lock));
 
@@ -4066,7 +4077,9 @@ main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 
+#if CONFIG_VALGRIND
 		threads_inited = 1;
+#endif
 	}
 
 	/* Open arguments. */
