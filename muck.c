@@ -2909,8 +2909,6 @@ source_worker(void *arg)
 
 				close_input(&in0);
 
-				atomic_store_lax(&seek_pts, AV_NOPTS_VALUE /* Initial seek. */);
-
 				atomic_store_lax(&in0.pf.f, seek_file0);
 				seek_file0 = NULL;
 				in0.pf.p = get_parent(&master, &in0.pf.f->a);
@@ -2932,7 +2930,6 @@ source_worker(void *arg)
 				update_cover(&in0);
 
 				seek_buffer(INT64_MIN);
-
 				atomic_store_lax(&seek_pts, seek_file_pts);
 
 				discont = 0; /* TODO: Eh... seek by user =>flush or automatic =>no flush? */
