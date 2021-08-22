@@ -1730,10 +1730,10 @@ update_output_info(void)
 }
 
 static int
-configure_output(AVFrame const *in_frame)
+configure_output(AVFrame const *frame)
 {
 	AVCodec const *codec = !strcmp(ocodec, "pcm")
-		? avcodec_find_encoder(av_get_pcm_codec(in_frame->format, -1))
+		? avcodec_find_encoder(av_get_pcm_codec(frame->format, -1))
 		: avcodec_find_encoder_by_name(ocodec);
 	if (!codec) {
 		assert(!"no codec");
@@ -1743,8 +1743,8 @@ configure_output(AVFrame const *in_frame)
 	/* Configuration not changed. */
 	if (out.codec_ctx &&
 	    codec == out.codec_ctx->codec &&
-	    out.codec_ctx->sample_rate == in_frame->sample_rate &&
-	    out.codec_ctx->channels == in_frame->channels)
+	    out.codec_ctx->sample_rate == frame->sample_rate &&
+	    out.codec_ctx->channels == frame->channels)
 		return 0;
 
 	close_output();
@@ -1776,9 +1776,9 @@ configure_output(AVFrame const *in_frame)
 
 	/* Set the basic encoder parameters.
 	 * The input file's sample rate is used to avoid a sample rate conversion. */
-	out.codec_ctx->channels = in_frame->channels;
+	out.codec_ctx->channels = frame->channels;
 	out.codec_ctx->channel_layout = av_get_default_channel_layout(out.codec_ctx->channels);
-	out.codec_ctx->sample_rate = in_frame->sample_rate;
+	out.codec_ctx->sample_rate = frame->sample_rate;
 	out.codec_ctx->sample_fmt = codec->sample_fmts[0];
 	out.codec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
 
@@ -2873,8 +2873,8 @@ source_worker(void *arg)
 	 * acquired mutex lock before we would fall asleep. */
 	int locked = 0;
 
-	AVPacket *in_pkt = av_packet_alloc();
-	if (!in_pkt) {
+	AVPacket *pkt = av_packet_alloc();
+	if (!pkt) {
 		print_error("Could not allocate memory");
 		goto terminate;
 	}
@@ -2987,29 +2987,29 @@ source_worker(void *arg)
 			continue;
 		}
 
-		AVFrame *in_frame = buffer[buffer_tail];
+		AVFrame *frame = buffer[buffer_tail];
 
-		if (!in_frame) {
+		if (!frame) {
 			for (uint16_t to = atomic_load_lax(&buffer_head);
 			     buffer_hair < to;
 			     ++buffer_hair)
-				if ((in_frame = buffer[buffer_hair])) {
+				if ((frame = buffer[buffer_hair])) {
 					buffer[buffer_hair++] = NULL;
 					break;
 				}
 
-			if (unlikely(!in_frame) &&
-			    unlikely(!(in_frame = av_frame_alloc())))
+			if (unlikely(!frame) &&
+			    unlikely(!(frame = av_frame_alloc())))
 			{
 				print_error("Could not allocate memory");
 				goto stop;
 			}
-			buffer[buffer_tail] = in_frame;
+			buffer[buffer_tail] = frame;
 		}
 
 		Input *in = &in0;
 
-		rc = av_read_frame(in->s.format_ctx, in_pkt);
+		rc = av_read_frame(in->s.format_ctx, pkt);
 		if (unlikely(rc < 0)) {
 			if (AVERROR_EOF != rc)
 				av_log(in->s.format_ctx, AV_LOG_ERROR, "Could not read frame: %s\n",
@@ -3028,8 +3028,8 @@ source_worker(void *arg)
 		}
 
 		/* Packet from an uninteresting stream. */
-		if (unlikely(in->s.audio->index != in_pkt->stream_index)) {
-			av_packet_unref(in_pkt);
+		if (unlikely(in->s.audio->index != pkt->stream_index)) {
+			av_packet_unref(pkt);
 			continue;
 		}
 
@@ -3045,26 +3045,26 @@ source_worker(void *arg)
 		}
 
 		/* Send read packet for decoding. */
-		rc = avcodec_send_packet(in->s.codec_ctx, in_pkt);
-		av_packet_unref(in_pkt);
+		rc = avcodec_send_packet(in->s.codec_ctx, pkt);
+		av_packet_unref(pkt);
 
 		/* Receive decoded frame. */
 		if (likely(0 <= rc))
-			rc = avcodec_receive_frame(in->s.codec_ctx, in_frame);
+			rc = avcodec_receive_frame(in->s.codec_ctx, frame);
 
 		if (likely(0 <= rc)) {
-			atomic_fetch_add_lax(&buffer_bytes, in_frame->pkt_size);
+			atomic_fetch_add_lax(&buffer_bytes, frame->pkt_size);
 
 			/* Unused by FFmpeg. */
-			in_frame->pts = av_rescale(in_frame->pts,
+			frame->pts = av_rescale(frame->pts,
 					in->s.audio->time_base.num,
 					in->s.audio->time_base.den);
-			in_frame->opaque = (void *)(size_t)discont;
+			frame->opaque = (void *)(size_t)discont;
 			discont = 0;
 
 			atomic_store_lax(&cur_duration,
 					AV_NOPTS_VALUE == in0.s.format_ctx->duration
-						? in_frame->pts
+						? frame->pts
 						: av_rescale(in0.s.format_ctx->duration, 1, AV_TIME_BASE));
 
 			atomic_store_lax(&source_state, SS_RUNNING);
@@ -3091,7 +3091,7 @@ source_worker(void *arg)
 terminate:
 	if (locked)
 		xassert(!pthread_mutex_unlock(&buffer_lock));
-	av_packet_free(&in_pkt);
+	av_packet_free(&pkt);
 
 	return NULL;
 }
@@ -3115,13 +3115,13 @@ sink_worker(void *arg)
 #endif
 
 	int locked = 0;
-	AVFrame *in_frame = NULL;
+	AVFrame *frame = NULL;
 	int64_t out_dts = 0;
 
-	AVPacket *out_pkt = av_packet_alloc();
+	AVPacket *pkt = av_packet_alloc();
 	AVBufferSrcParameters *pars = av_buffersrc_parameters_alloc();
 
-	if (!out_pkt || !pars) {
+	if (!pkt || !pars) {
 		print_error("Could not allocate memory");
 		goto terminate;
 	}
@@ -3160,14 +3160,14 @@ sink_worker(void *arg)
 			continue;
 		}
 
-		in_frame = atomic_exchange_lax(&buffer[head], in_frame);
+		frame = atomic_exchange_lax(&buffer[head], frame);
 		/* If head stayed the same we can be sure that picked frame is valid. */
 		if (unlikely(!atomic_compare_exchange_strong_explicit(
 				&buffer_head, &head, head + 1,
 				memory_order_relaxed, memory_order_relaxed)))
 			continue;
 
-		int64_t rem_bytes = atomic_fetch_sub_lax(&buffer_bytes, in_frame->pkt_size) - in_frame->pkt_size;
+		int64_t rem_bytes = atomic_fetch_sub_lax(&buffer_bytes, frame->pkt_size) - frame->pkt_size;
 		assert(0 <= rem_bytes);
 		if ((rem_bytes <= atomic_load_lax(&buffer_full_bytes) / 2 &&
 		     SS_WAITING == atomic_load_lax(&source_state)) ||
@@ -3181,13 +3181,13 @@ sink_worker(void *arg)
 		}
 
 		int graph_changed = 0;
-#define xmacro(x) (graph_changed |= pars->x != in_frame->x, pars->x = in_frame->x)
+#define xmacro(x) (graph_changed |= pars->x != frame->x, pars->x = frame->x)
 		xmacro(format);
 		xmacro(sample_rate);
 		xmacro(channel_layout);
 #undef xmacro
 		for (;;) {
-			int rc = configure_output(in_frame);
+			int rc = configure_output(frame);
 			if ((!rc && unlikely(graph_changed)) ||
 			    unlikely(0 < rc))
 				rc = configure_graph(pars);
@@ -3221,50 +3221,51 @@ sink_worker(void *arg)
 			}
 		}
 
-		if (unlikely(in_frame->opaque))
+		if (unlikely(frame->opaque))
 			flush_output();
 
-		atomic_store_lax(&cur_pts, in_frame->pts);
+		atomic_store_lax(&cur_pts, frame->pts);
 
 		print_progress(0);
 		if (tty)
 			fflush(tty);
 
-		in_frame->pts = out_dts;
-		in_frame->pkt_dts = out_dts;
-		in_frame->pkt_duration = in_frame->nb_samples
-			* out.audio->time_base.den / in_frame->sample_rate / out.audio->time_base.num;
-		out_dts += out_pkt->duration;
+		frame->pts = out_dts;
+		frame->pkt_dts = out_dts;
+		frame->pkt_duration = frame->nb_samples *
+			out.audio->time_base.den / frame->sample_rate / out.audio->time_base.num;
 
 		int rc;
 
-		rc = av_buffersrc_add_frame_flags(buffer_ctx, in_frame, AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
+		rc = av_buffersrc_add_frame_flags(buffer_ctx, frame, AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
 		if (unlikely(rc < 0))
 			av_log(graph, AV_LOG_ERROR,
 					"Could not push frame into filtergraph: %s\n",
 					av_err2str(rc));
 
-		rc = av_buffersink_get_frame_flags(buffersink_ctx, in_frame, 0);
+		rc = av_buffersink_get_frame_flags(buffersink_ctx, frame, 0);
 		if (unlikely(rc < 0))
 			av_log(graph, AV_LOG_ERROR,
 					"Could not pull frame from filtergraph: %s\n",
 					av_err2str(rc));
 
 		/* Send a frame to encode. */
-		rc = avcodec_send_frame(out.codec_ctx, in_frame);
+		rc = avcodec_send_frame(out.codec_ctx, frame);
 		if (unlikely(rc < 0))
 			av_log(out.format_ctx, AV_LOG_ERROR,
 					"Could not encode frame: %s\n",
 					av_err2str(rc));
 
 		/* Receive an encoded packet. */
-		while (0 <= (rc = avcodec_receive_packet(out.codec_ctx, out_pkt))) {
-			rc = av_write_frame(out.format_ctx, out_pkt);
+		while (0 <= (rc = avcodec_receive_packet(out.codec_ctx, pkt))) {
+			out_dts += pkt->duration;
+
+			rc = av_write_frame(out.format_ctx, pkt);
 			if (unlikely(rc < 0))
 				av_log(out.format_ctx, AV_LOG_ERROR,
 						"Could not write encoded frame: %s\n",
 						av_err2str(rc));
-			av_packet_unref(out_pkt);
+			av_packet_unref(pkt);
 		}
 		if (unlikely(AVERROR(EAGAIN) != rc))
 			av_log(out.format_ctx, AV_LOG_ERROR,
@@ -3279,8 +3280,8 @@ terminate:
 	if (locked)
 		xassert(!pthread_mutex_unlock(&buffer_lock));
 	av_free(pars);
-	av_frame_free(&in_frame);
-	av_packet_free(&out_pkt);
+	av_frame_free(&frame);
+	av_packet_free(&pkt);
 
 	return NULL;
 }
