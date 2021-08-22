@@ -1492,6 +1492,7 @@ open_input(Input *in)
 	in->s.audio = NULL;
 
 	unsigned nb_audios = 0;
+	unsigned track = atomic_load_lax(&cur_track);
 
 	for (unsigned i = 0; i < in->s.format_ctx->nb_streams; ++i) {
 		AVStream *stream = in->s.format_ctx->streams[i];
@@ -1499,8 +1500,9 @@ open_input(Input *in)
 		stream->discard = AVDISCARD_ALL;
 
 		if (AVMEDIA_TYPE_AUDIO == stream->codecpar->codec_type) {
-			if (cur_track == nb_audios++)
+			if (!track || track == nb_audios)
 				in->s.audio = stream;
+			++nb_audios;
 			continue;
 		}
 
@@ -1523,6 +1525,8 @@ open_input(Input *in)
 		return -1;
 	}
 
+	if (track < nb_audios)
+		atomic_store_lax(&cur_track, 0);
 #if 0
 	AVStream *default_stream = in->s.format_ctx->streams[av_find_default_stream_index(in->s.format_ctx)];
 	if (default_stream->opaque)
