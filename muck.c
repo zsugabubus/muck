@@ -3496,6 +3496,10 @@ open_visual_search(void)
 
 	char const *pathname = get_config_path("search-history");
 	FILE *history = fopen(pathname, "re");
+	char const *home = getenv("HOME");
+	size_t home_size = strlen(home);
+	int tilde = !strncmp(pathname, home, home_size);
+	fprintf(stream, "# %s%s:\n", tilde ? "~" : "", pathname + (tilde ? home_size : 0));
 	if (history) {
 		char buf[BUFSIZ];
 		size_t buf_size;
@@ -3503,10 +3507,7 @@ open_visual_search(void)
 			fwrite(buf, 1, buf_size, stream);
 		fclose(history);
 	} else
-		fprintf(stream, "# %s is not found.\n"
-				"#\n"
-				"# Write any text into it to show here.\n",
-				pathname);
+		fprintf(stream, "# %s.\n", strerror(errno));
 	fputc('\n', stream);
 
 	fprintf(stream,
