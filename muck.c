@@ -1865,16 +1865,18 @@ get_parent(Playlist const *ancestor, AnyFile const *a)
 }
 
 static void
-print_file(File const *f, FILE *stream)
+print_file(File const *f, FILE *stream, int highlight)
 {
 	char const *str;
 
 	flockfile(stream);
 
-	fprintf(tty, "\e[37m%6"PRId64"\e[m ", get_file_index((PlaylistFile){
-		.p = get_parent(&master, &f->a),
-		.f = (File *)f,
-	}));
+	fprintf(tty, "%s\e[37m%6"PRId64"\e[m ",
+			highlight ? "\e[1;33m>\e[m" : " ",
+			get_file_index((PlaylistFile){
+				.p = get_parent(&master, &f->a),
+				.f = (File *)f,
+			}));
 #define M(name) (f->metadata[M_##name] && (str = f->a.url + f->metadata[M_##name]))
 
 	if (!M(album_artist) && !M(artist) && !M(title)) {
@@ -2020,6 +2022,8 @@ print_file(File const *f, FILE *stream)
 
 #undef M
 
+	if (highlight)
+		fputs(" \e[1;33m<\e[m", tty);
 	fputc('\n', stream);
 
 	funlockfile(stream);
@@ -2798,18 +2802,20 @@ print_around(PlaylistFile pf)
 #undef WALK
 
 	flockfile(tty);
-	fprintf(tty, "\e[K\e[?7lPlaylist:\n");
+	int lines = win_height / 8;
+	if (lines < 4)
+		lines = 4;
+	fprintf(tty, "\e[?7l" "\e[J" "\e[%dB", lines);
 	for (;;) {
-		fprintf(tty, !from_offset ? "\e[1;33m>\e[m" : " ");
-		print_file(from.f, tty);
-
+		print_file(from.f, tty, !from_offset);
 		if (to_lim <= 0 || from.f == to_stop.f)
 			break;
 		from = seek_playlist(&master, &from, 1, SEEK_CUR);
 		++from_offset;
 		--to_lim;
+		++lines;
 	}
-	fprintf(tty, "\e[?7h");
+	fprintf(tty, "\e[?7h" "\e[%dA", lines + 1);
 	funlockfile(tty);
 }
 
@@ -2933,7 +2939,7 @@ source_worker(void *arg)
 					if (atomic_load_lax(&auto_i))
 						print_format();
 					print_now_playing();
-					print_file(in0.pf.f, tty);
+					print_file(in0.pf.f, tty, 0);
 				}
 
 				print_progress(1);
@@ -3419,7 +3425,7 @@ handle_sigexit(int sig)
 static int
 spawn(void)
 {
-	fputs("\e[K", tty);
+	fputs("\e[J", tty);
 	fflush(tty);
 
 	pid_t pid;
@@ -3747,7 +3753,7 @@ do_cmd(char c)
 		/* FALLTHROUGH */
 	case 'i': /* Information. */
 		print_format();
-		print_file(atomic_load_lax(&in0.pf.f), tty);
+		print_file(atomic_load_lax(&in0.pf.f), tty, 0);
 		break;
 
 	case 'm': /* Metadata. */
@@ -3883,8 +3889,10 @@ do_cmd(char c)
 		break;
 
 	case 'W':
-		if (!toggle(&auto_w, "Auto w"))
+		if (!toggle(&auto_w, "Auto w")) {
+			fputs("\e[J", tty);
 			break;
+		}
 		/* FALLTHROUGH */
 	case 'w': /* Where. */
 		print_around(get_current_pf());
