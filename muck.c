@@ -293,6 +293,7 @@ static char const *ofilename = NULL;
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
 static unsigned _Atomic cur_track;
+static atomic_uchar ALIGNED_ATOMIC dump_in0;
 
 static struct {
 	BirdLock lock;
@@ -2669,6 +2670,14 @@ print_progress(int force)
 }
 
 static void
+do_wakeup(void)
+{
+	xassert(!pthread_mutex_lock(&buffer_lock));
+	xassert(!pthread_cond_broadcast(&buffer_wakeup));
+	xassert(!pthread_mutex_unlock(&buffer_lock));
+}
+
+static void
 seek_player(int64_t ts, int whence)
 {
 	switch (whence) {
@@ -2697,10 +2706,7 @@ seek_player(int64_t ts, int whence)
 		ts = 0;
 
 	atomic_store_lax(&seek_pts, ts);
-
-	xassert(!pthread_mutex_lock(&buffer_lock));
-	xassert(!pthread_cond_broadcast(&buffer_wakeup));
-	xassert(!pthread_mutex_unlock(&buffer_lock));
+	do_wakeup();
 }
 
 static void
@@ -2997,6 +3003,15 @@ source_worker(void *arg)
 			xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
 		}
 
+		if (unlikely(atomic_load_lax(&dump_in0))) {
+			int old_level = av_log_get_level();
+			av_log_set_level(AV_LOG_DEBUG); /* <-- Not atomic. */
+			av_dump_format(in0.s.format_ctx, 0, in0.pf.f->a.url, 0);
+			av_log_set_level(old_level);
+			/* It is not an exchange. */
+			atomic_store_lax(&dump_in0, 0);
+		}
+
 		if (locked) {
 			xassert(!pthread_mutex_unlock(&buffer_lock));
 			locked = 0;
@@ -3191,9 +3206,7 @@ sink_worker(void *arg)
 		{
 			if (AV_LOG_DEBUG <= av_log_get_level())
 				fprintf(tty, "Requesting more bytes %ld %ld\n", rem_bytes , atomic_load_lax(&buffer_full_bytes) / 2);
-			xassert(!pthread_mutex_lock(&buffer_lock));
-			xassert(!pthread_cond_signal(&buffer_wakeup));
-			xassert(!pthread_mutex_unlock(&buffer_lock));
+			do_wakeup();
 		}
 
 		int graph_changed = 0;
@@ -3322,9 +3335,7 @@ do_cleanup(void)
 #if CONFIG_VALGRIND
 	if (threads_inited) {
 		atomic_store_lax(&terminate, 1);
-		xassert(!pthread_mutex_lock(&buffer_lock));
-		xassert(!pthread_cond_broadcast(&buffer_wakeup));
-		xassert(!pthread_mutex_unlock(&buffer_lock));
+		do_wakeup();
 
 		fputs("Waiting for producer thread to exit..."CR, tty);
 		fflush(tty);
@@ -3390,10 +3401,7 @@ play_file(File *f, int64_t pts)
 	/* Mutex will acquire. */
 	atomic_store_lax(&seek_file_pts, pts);
 	atomic_store_lax(&seek_file0, f);
-
-	xassert(!pthread_mutex_lock(&buffer_lock));
-	xassert(!pthread_cond_broadcast(&buffer_wakeup));
-	xassert(!pthread_mutex_unlock(&buffer_lock));
+	do_wakeup();
 }
 
 static void
@@ -3671,11 +3679,8 @@ static void
 pause_player(int pause)
 {
 	atomic_store_lax(&paused, pause);
-	if (!pause) {
-		xassert(!pthread_mutex_lock(&buffer_lock));
-		xassert(!pthread_cond_broadcast(&buffer_wakeup));
-		xassert(!pthread_mutex_unlock(&buffer_lock));
-	}
+	if (!pause)
+		do_wakeup();
 }
 
 static struct timespec
@@ -3757,17 +3762,8 @@ do_cmd(char c)
 		break;
 
 	case 'm': /* Metadata. */
-	{
-		int rc = pthread_mutex_trylock(&file_lock);
-		if (EBUSY == rc)
-			break;
-		xassert(!rc);
-		int old_level = av_log_get_level();
-		av_log_set_level(AV_LOG_DEBUG);
-		av_dump_format(in0.s.format_ctx, 0, atomic_load_lax(&in0.pf.f)->a.url, 0);
-		av_log_set_level(old_level);
-		xassert(!pthread_mutex_unlock(&file_lock));
-	}
+		atomic_store_lax(&dump_in0, 1);
+		do_wakeup();
 		break;
 
 	case '&':
