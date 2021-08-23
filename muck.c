@@ -1341,6 +1341,10 @@ read_metadata(Input const *in)
 					++src;
 
 				size_t n = strlen(src) + 1 /* NUL */;
+				/* Ignore useless tags. */
+				if (1 == n ||
+				    (2 == n && !memcmp(src, "0", 1)))
+					continue;
 
 				if (UINT16_MAX < file_data_size + n)
 					goto fail_too_long;
