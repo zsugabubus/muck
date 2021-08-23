@@ -3834,6 +3834,9 @@ do_cmd(char c)
 	{
 		static int64_t s_number = 0;
 		pf = seek_playlist(&master, NULL, use_number(&s_number), SEEK_SET);
+		/* Stay close to file, even if it fails to play. */
+		if ('p' != seek_cmd && 'n' != seek_cmd)
+			seek_cmd = 'n';
 		goto play_file;
 	}
 
