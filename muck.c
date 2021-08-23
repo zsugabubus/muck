@@ -1849,6 +1849,21 @@ get_file_index(PlaylistFile pf)
 	return ret;
 }
 
+static Playlist *
+get_parent(Playlist const *ancestor, AnyFile const *a)
+{
+	if ((uintptr_t)a - (uintptr_t)ancestor->files < ancestor->files_size)
+		return (Playlist *)ancestor;
+
+	for_each_playlist(child, ancestor) {
+		Playlist *ret = get_parent(child, a);
+		if (ret)
+			return ret;
+	}
+
+	return NULL;
+}
+
 static void
 print_file(File const *f, FILE *stream)
 {
@@ -1856,6 +1871,10 @@ print_file(File const *f, FILE *stream)
 
 	flockfile(stream);
 
+	fprintf(tty, "\e[37m%6"PRId64"\e[m ", get_file_index((PlaylistFile){
+		.p = get_parent(&master, &f->a),
+		.f = (File *)f,
+	}));
 #define M(name) (f->metadata[M_##name] && (str = f->a.url + f->metadata[M_##name]))
 
 	if (!M(album_artist) && !M(artist) && !M(title)) {
@@ -2205,21 +2224,6 @@ match_file(Playlist *parent, AnyFile *a, uint8_t filter_index, Clause const *cla
 	f->a.filter_mask |= UINT32_C(1) << filter_index;
 
 	return 1;
-}
-
-static Playlist *
-get_parent(Playlist *ancestor, AnyFile *a)
-{
-	if ((uintptr_t)a - (uintptr_t)ancestor->files < ancestor->files_size)
-		return ancestor;
-
-	for_each_playlist(child, ancestor) {
-		Playlist *ret = get_parent(child, a);
-		if (ret)
-			return ret;
-	}
-
-	return NULL;
 }
 
 static PlaylistFile
