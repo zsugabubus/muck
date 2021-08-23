@@ -2923,17 +2923,21 @@ source_worker(void *arg)
 				seek_file0 = NULL;
 				in0.pf.p = get_parent(&master, &in0.pf.f->a);
 
-				if (open_input(&in0) < 0)
+				rc = open_input(&in0);
+				if (rc < 0)
 					write(control[1], (char const[]){ CONTROL('J') }, 1);
 
 				update_input_info();
 
-				if (atomic_load_lax(&auto_w))
-					print_around(in0.pf);
-				if (atomic_load_lax(&auto_i))
-					print_format();
-				print_now_playing();
-				print_file(in0.pf.f, tty);
+				/* Otherwise it is just noise. */
+				if (0 <= rc) {
+					if (atomic_load_lax(&auto_w))
+						print_around(in0.pf);
+					if (atomic_load_lax(&auto_i))
+						print_format();
+					print_now_playing();
+					print_file(in0.pf.f, tty);
+				}
 
 				print_progress(1);
 				if (tty)
