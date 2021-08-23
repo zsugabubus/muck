@@ -3204,7 +3204,7 @@ sink_worker(void *arg)
 		     SS_WAITING == atomic_load_lax(&source_state)) ||
 		    !rem_bytes)
 		{
-			if (AV_LOG_DEBUG <= av_log_get_level())
+			if (unlikely(AV_LOG_DEBUG <= av_log_get_level()))
 				fprintf(tty, "Requesting more bytes %ld %ld\n", rem_bytes , atomic_load_lax(&buffer_full_bytes) / 2);
 			do_wakeup();
 		}
