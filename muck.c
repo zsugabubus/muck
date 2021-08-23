@@ -1256,6 +1256,7 @@ read_metadata(Input const *in)
 		{ M_album_version, "album_version\0" "ALBUM/VERSION\0" },
 		{ M_artist, "artist\0" "ARTISTS\0" },
 		{ M_barcode, "BARCODE\0" "UPC\0" "EAN\0" },
+		{ M_bpm, "TBPM\0" },
 		{ M_date, "date_released\0" "date\0" "date_published\0" "TYER\0" },
 		{ M_disc, "disc\0" },
 		{ M_disc_total, "disc_total\0" },
