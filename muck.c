@@ -2797,13 +2797,10 @@ print_around(PlaylistFile pf)
 
 #undef WALK
 
+	flockfile(tty);
 	fprintf(tty, "\e[K\e[?7lPlaylist:\n");
-
 	for (;;) {
-		fprintf(tty, "\e[;%dm%6"PRIu64"\e[m ",
-				from_offset ? 0 : 7,
-				from_offset ? labs(from_offset) : get_file_index(from));
-
+		fprintf(tty, !from_offset ? "\e[1;33m>\e[m" : " ");
 		print_file(from.f, tty);
 
 		if (to_lim <= 0 || from.f == to_stop.f)
@@ -2812,8 +2809,8 @@ print_around(PlaylistFile pf)
 		++from_offset;
 		--to_lim;
 	}
-
 	fprintf(tty, "\e[?7h");
+	funlockfile(tty);
 }
 
 /* static void
