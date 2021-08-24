@@ -71,6 +71,7 @@
 	 (haystack##_size -= strlen(needle), 1))
 
 static char const XATTR_COMMENT[] = "user.comment";
+static char const XATTR_LAST_PLAY[] = "user.last_play";
 static char const XATTR_PLAY_COUNT[] = "user.play_count";
 static char const XATTR_SKIP_COUNT[] = "user.skip_count";
 static char const XATTR_TAGS[] = "user.tags";
@@ -129,12 +130,13 @@ static char const XATTR_TAGS[] = "user.tags";
 	xmacro('C', catalog) \
 	xmacro('y', date) \
 	xmacro('o', codec) \
-	xmacro('c', play_count) /* XXX: c | p | x? */ \
+	xmacro('c', play_count) \
+	xmacro('h', last_play) /* Last heard. */ \
 	xmacro('s', skip_count) \
-	xmacro('m', mtime) \
-	xmacro('h', ptime) /* Last play time. (Last heard.) */ \
+	/* xmacro('e', added) */ \
+	xmacro('h', mtime) \
 	xmacro('d', duration) \
-	xmacro('e', user_comment) \
+	xmacro('r', user_comment) \
 	xmacro('z', tags)
 
 /* Extra metadata-like stuff. */
@@ -502,10 +504,10 @@ plumb_file_(AnyFile const *a, char const *dirname, uint8_t filter_index, FILE *s
 			fputs(dirname, stream);
 		fputs(f->a.url, stream);
 
-		for (enum Metadata m = 0; m < M_NB; ++m) {
+		for (enum Metadata i = 0; i < M_NB; ++i) {
 			fputc('\t', stream);
-			if (f->metadata[m])
-				fputs(f->a.url + f->metadata[m], stream);
+			if (f->metadata[i])
+				fputs(f->a.url + f->metadata[i], stream);
 		}
 
 		fputc('\n', stream);
@@ -523,9 +525,9 @@ static void
 plumb_file(AnyFile const *a, uint8_t filter_index, FILE *stream)
 {
 	fputs("path", stream);
-	for (enum Metadata m = 0; m < M_NB; ++m) {
+	for (enum Metadata i = 0; i < M_NB; ++i) {
 		fputc('\t', stream);
-		fputs(METADATA_NAMES[m], stream);
+		fputs(METADATA_NAMES[i], stream);
 	}
 	fputc('\n', stream);
 
@@ -642,8 +644,8 @@ read_playlist(Playlist *playlist, int fd)
 	char const *error_msg = NULL;
 
 	File file;
-	char file_data[UINT16_MAX];
-	size_t file_data_size = 0;
+	char fdata[UINT16_MAX];
+	size_t fdata_size = 0;
 
 	char buf[UINT16_MAX]; /* NOTE: In theory a line could be longer. */
 	uint16_t buf_size = 0;
@@ -686,20 +688,20 @@ read_playlist(Playlist *playlist, int fd)
 	 (col = line + 1 + strlen(directive)))
 
 			if (IS_DIRECTIVE("EXTINF:")) {
-				for (enum Metadata m = 0; m < M_NB; ++m)
-					file.metadata[m] = UINT16_MAX;
-				file_data_size = 0;
+				for (enum Metadata i = 0; i < M_NB; ++i)
+					file.metadata[i] = UINT16_MAX;
+				fdata_size = 0;
 
 				file.metadata[M_duration] = 0;
 				while ('0' <= *col && *col <= '9') {
-					if (sizeof file_data <= file_data_size) {
+					if (sizeof fdata <= fdata_size) {
 					fail_too_long:
 						error_msg = "Too much data";
 						goto out;
 					}
-					file_data[file_data_size++] = *col++;
+					fdata[fdata_size++] = *col++;
 				}
-				file_data[file_data_size++] = '\0';
+				fdata[fdata_size++] = '\0';
 
 				for (;;) {
 					while (' ' == *col)
@@ -742,7 +744,7 @@ read_playlist(Playlist *playlist, int fd)
 					}
 					++col;
 
-					file.metadata[m] = file_data_size;
+					file.metadata[m] = fdata_size;
 					for (;;) {
 						if ('"' == *col) {
 							++col;
@@ -755,11 +757,11 @@ read_playlist(Playlist *playlist, int fd)
 							goto out;
 						}
 
-						if (sizeof file_data <= file_data_size)
+						if (sizeof fdata <= fdata_size)
 							goto fail_too_long;
-						file_data[file_data_size++] = *col++;
+						fdata[fdata_size++] = *col++;
 					}
-					file_data[file_data_size++] = '\0';
+					fdata[fdata_size++] = '\0';
 				}
 
 				if (*col) {
@@ -809,32 +811,32 @@ read_playlist(Playlist *playlist, int fd)
 			char const *url = line;
 			size_t url_size = line_end - line + 1 /* NUL */;
 
-			if (sizeof file_data < url_size + file_data_size)
+			if (sizeof fdata < url_size + fdata_size)
 				goto fail_too_long;
 
 			enum FileType type = probe_url(NULL, url);
 			AnyFile *a = append_file(playlist, type);
 			if (a->type <= F_FILE) {
 				File *f = (void *)a;
-				for (enum Metadata m = 0; m < M_NB; ++m)
-					f->metadata[m] = UINT16_MAX != file.metadata[m]
-						? url_size + file.metadata[m]
+				for (enum Metadata i = 0; i < M_NB; ++i)
+					f->metadata[i] = UINT16_MAX != file.metadata[i]
+						? url_size + file.metadata[i]
 						: 0;
 			} else {
-				file_data_size = 0;
+				fdata_size = 0;
 			}
 
-			if (!(a->url = malloc(url_size + file_data_size)))
+			if (!(a->url = malloc(url_size + fdata_size)))
 				goto fail_enomem;
 			memcpy(a->url, url, url_size);
-			memcpy(a->url + url_size, file_data, file_data_size);
+			memcpy(a->url + url_size, fdata, fdata_size);
 
 			read_file(playlist, a);
 
 		reset_file:;
-			for (enum Metadata m = 0; m < M_NB; ++m)
-				file.metadata[m] = UINT16_MAX;
-			file_data_size = 0;
+			for (enum Metadata i = 0; i < M_NB; ++i)
+				file.metadata[i] = UINT16_MAX;
+			fdata_size = 0;
 		}
 
 		++line_end; /* Skip LF. */
@@ -1040,10 +1042,10 @@ write_playlist(Playlist *playlist, FILE *stream)
 			File const *f = (void *)a;
 
 			int any = 0;
-			for (enum Metadata m = 0; m < M_NB; ++m) {
-				if (!f->metadata[m])
+			for (enum Metadata i = 0; i < M_NB; ++i) {
+				if (!f->metadata[i])
 					continue;
-				if (M_duration == m)
+				if (M_duration == i)
 					continue;
 
 				if (!any)
@@ -1052,8 +1054,8 @@ write_playlist(Playlist *playlist, FILE *stream)
 								? f->a.url + f->metadata[M_duration]
 								: "");
 
-				fprintf(stream, " %s=\"", METADATA_NAMES[m]);
-				for (char const *c = f->a.url + f->metadata[m];
+				fprintf(stream, " %s=\"", METADATA_NAMES[i]);
+				for (char const *c = f->a.url + f->metadata[i];
 				     *c;
 				     ++c)
 				{
@@ -1185,18 +1187,55 @@ close_input(Input *in)
 }
 
 static int
-read_xattr(Input const *in, File *tmpf, char *file_data, size_t *pfile_data_size, char const *xname, enum Metadata xm)
+fdata_write_date(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, time_t time)
 {
-	size_t max = (UINT16_MAX - 1 /* NUL */) - *pfile_data_size;
-	ssize_t size = fgetxattr(in->fd, xname, file_data + *pfile_data_size, max);
-	if (0 < size) {
-		if (max <= (size_t)size)
-			return -ENOSPC;
+	size_t size = UINT16_MAX - *fdata_size;
+	int n = strftime(fdata + *fdata_size, size, "%F", gmtime(&time));
+	if (!n)
+		return -1;
 
-		tmpf->metadata[xm] = *pfile_data_size;
-		file_data[*pfile_data_size + size] = '\0';
-		*pfile_data_size += size + 1 /* NUL */;
+	tmpf->metadata[m] = *fdata_size;
+	fdata[*fdata_size + n] = '\0';
+	*fdata_size += n + 1 /* NUL */;
+
+	return 0;
+}
+
+static int
+fdata_write_xattr(Input const *in, File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char const *name)
+{
+	size_t size = (UINT16_MAX - 1 /* NUL */) - *fdata_size;
+	ssize_t n = fgetxattr(in->fd, name, fdata + *fdata_size, size);
+	if (0 < n) {
+		if (size <= (size_t)n)
+			return -1;
+
+		tmpf->metadata[m] = *fdata_size;
+		fdata[*fdata_size + n] = '\0';
+		*fdata_size += n + 1 /* NUL */;
 	}
+
+	return 0;
+}
+
+static int
+fdata_writef(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char const *format, ...)
+{
+	va_list ap;
+
+	va_start(ap, format);
+	size_t size = UINT16_MAX - *fdata_size;
+	int n = vsnprintf(fdata + *fdata_size, size, format, ap);
+	va_end(ap);
+
+	if (size <= (size_t)n)
+		return -1;
+	if (!n)
+		return 0;
+
+	tmpf->metadata[m] = *fdata_size;
+	fdata[*fdata_size + n] = '\0';
+	*fdata_size += n + 1 /* NUL */;
 
 	return 0;
 }
@@ -1276,53 +1315,33 @@ read_metadata(Input const *in)
 	File *f = in->pf.f;
 
 	File tmpf;
-	char file_data[UINT16_MAX];
+	char fdata[UINT16_MAX];
 
 	/* Begin file data with its URL. */
 	size_t url_size = strlen(f->a.url) + 1 /* NUL */;
-	size_t file_data_size = url_size;
+	size_t fdata_size = url_size;
 
-	for (enum Metadata m = 0; m < M_NB; ++m)
-		tmpf.metadata[m] = 0;
+	for (enum Metadata i = 0; i < M_NB; ++i)
+		tmpf.metadata[i] = 0;
 
-	/* Append duration. */
-	int64_t duration = in->s.format_ctx->duration;
-	if (AV_NOPTS_VALUE != duration) {
-		if (UINT16_MAX < file_data_size + (1 + 20 + 1)) {
-		fail_too_long:
-			print_file_error(playlist, &f->a, "Too much metadata", NULL);
-			return;
+	{
+		/* Append duration. */
+		int64_t duration = in->s.format_ctx->duration;
+		if (AV_NOPTS_VALUE != duration) {
+			int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_duration,
+					"%"PRId64,
+					av_rescale(duration, 1, AV_TIME_BASE));
+			if (rc < 0)
+				goto fail_too_long;
 		}
-
-		tmpf.metadata[M_duration] = file_data_size;
-		file_data_size += sprintf(file_data + file_data_size, "%"PRId64,
-				av_rescale(duration, 1, AV_TIME_BASE)) + 1 /* NUL */;
 	}
 
-	struct stat st;
-	if (0 <= in->fd && 0 <= fstat(in->fd, &st)) {
-		/* Append mtime. */
-		if (UINT16_MAX < file_data_size + sizeof "0000-00-00")
+	{
+		struct stat st;
+		if (0 <= in->fd && 0 <= fstat(in->fd, &st) &&
+		    fdata_write_date(&tmpf, fdata, &fdata_size, M_mtime, st.st_mtime) < 0)
 			goto fail_too_long;
-
-		tmpf.metadata[M_mtime] = file_data_size;
-		file_data_size += strftime(file_data + file_data_size, 11, "%F",
-				gmtime(&(time_t){ st.st_mtime })) + 1 /* NUL */;
 	}
-
-	/* Append codec. */
-	char buf[128];
-	av_get_channel_layout_string(buf, sizeof buf,
-			in->s.codec_ctx->channels, in->s.codec_ctx->channel_layout);
-	int n = snprintf(file_data + file_data_size, UINT16_MAX - file_data_size,
-			"%s-%s-%d",
-			in->s.codec_ctx->codec->name,
-			buf,
-			in->s.codec_ctx->sample_rate / 1000);
-	if (UINT16_MAX <= file_data_size + n)
-		goto fail_too_long;
-	tmpf.metadata[M_codec] = file_data_size;
-	file_data_size += n + 1 /* NUL */;
 
 	for (MetadataMapEntry const *e = METADATA_MAP;
 	     e < (&METADATA_MAP)[1];
@@ -1346,16 +1365,16 @@ read_metadata(Input const *in)
 				    (2 == n && !memcmp(src, "0", 1)))
 					continue;
 
-				if (UINT16_MAX < file_data_size + n)
+				if (UINT16_MAX < fdata_size + n)
 					goto fail_too_long;
 
 				if (!any)
-					tmpf.metadata[e->metadata] = file_data_size;
+					tmpf.metadata[e->metadata] = fdata_size;
 				else
-					file_data[file_data_size - 1] = ';';
+					fdata[fdata_size - 1] = ';';
 
-				char *dest = file_data + file_data_size;
-				file_data_size += n;
+				char *dest = fdata + fdata_size;
+				fdata_size += n;
 
 				for (; --n; ++dest, ++src)
 					*dest = (unsigned char)*src < ' ' ? ' ' : *src;
@@ -1373,36 +1392,68 @@ read_metadata(Input const *in)
 		}
 	}
 
-	if (read_xattr(in, &tmpf, file_data, &file_data_size, XATTR_COMMENT, M_user_comment) < 0 ||
-	    read_xattr(in, &tmpf, file_data, &file_data_size, XATTR_PLAY_COUNT, M_play_count) < 0 ||
-	    read_xattr(in, &tmpf, file_data, &file_data_size, XATTR_SKIP_COUNT, M_skip_count) < 0 ||
-	    read_xattr(in, &tmpf, file_data, &file_data_size, XATTR_TAGS, M_tags) < 0)
+	{
+		char buf[128];
+		av_get_channel_layout_string(buf, sizeof buf,
+				in->s.codec_ctx->channels,
+				in->s.codec_ctx->channel_layout);
+		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_codec,
+				"%s-%s-%d",
+				in->s.codec_ctx->codec->name,
+				buf,
+				in->s.codec_ctx->sample_rate / 1000);
+		if (rc < 0)
+			goto fail_too_long;
+	}
+
+#if 0
+	/* Preserve. */
+	if (f->metadata[M_added]) {
+		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_added,
+				"%s", f->a.url + f->metadata[M_added]);
+		if (rc < 0)
+			goto fail_too_long;
+	}
+#endif
+
+	if (fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_user_comment, XATTR_COMMENT) < 0 ||
+	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_last_play, XATTR_LAST_PLAY) < 0 ||
+	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_play_count, XATTR_PLAY_COUNT) < 0 ||
+	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_skip_count, XATTR_SKIP_COUNT) < 0 ||
+	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_tags, XATTR_TAGS) < 0)
 		goto fail_too_long;
 
 	if (!playlist->modified) {
-		for (enum Metadata m = 0; m < M_NB; ++m)
-			if (!!tmpf.metadata[m] != !!f->metadata[m] ||
-			    (tmpf.metadata[m] &&
-			     strcmp(file_data + tmpf.metadata[m], f->a.url + f->metadata[m])))
+		for (enum Metadata i = 0; i < M_NB; ++i)
+			if (!!tmpf.metadata[i] != !!f->metadata[i] ||
+			    (tmpf.metadata[i] &&
+			     strcmp(fdata + tmpf.metadata[i], f->a.url + f->metadata[i])))
 				goto changed;
 		return;
 	changed:
 	}
 
-	void *p;
-	if (!(p = malloc(file_data_size)))
-		goto fail_too_long;
+	void *p = malloc(fdata_size);
+	if (!p) {
+		print_error("Could not allocate memory");
+		return;
+	}
 
 	playlist->modified = 1;
 
 	memcpy(p, f->a.url, url_size);
-	memcpy(p + url_size, file_data + url_size, file_data_size - url_size);
+	memcpy(p + url_size, fdata + url_size, fdata_size - url_size);
 
 	free(f->a.url);
 	f->a.url = p;
 
 	memcpy(f->metadata, tmpf.metadata, sizeof tmpf.metadata);
 	sanitize_metadata(f);
+
+	return;
+
+fail_too_long:
+	print_file_error(playlist, &f->a, "Too much metadata", NULL);
 }
 
 static char const *
@@ -2376,9 +2427,10 @@ search_file(char const *s)
 
 	File const *cur = atomic_load_lax(&in0.pf.f);
 
+	int has_playlist_clause = 0;
+
 append:;
 	uint8_t unkeyed = 0;
-	int has_playlist_clause = 0;
 	int or = 0;
 	while (*s) {
 		switch (*s) {
@@ -2723,61 +2775,6 @@ print_now_playing(void)
 }
 
 static void
-increment_xattr(Input *in, char const *xname, enum Metadata xm)
-{
-	if (!writable)
-		return;
-
-	xassert(!pthread_mutex_lock(&file_lock));
-	File *f = in->pf.f;
-
-	char *str = f->metadata[xm]
-		? f->a.url + f->metadata[xm]
-		: NULL;
-	int oldn = str ? strlen(str) + 1 /* NUL */ : 0;
-	uint64_t current = str ? strtoull(str, NULL, 10) : 0;
-
-	++current;
-
-	char buf[22];
-	int n = sprintf(buf, "%"PRIu64, current);
-
-	if (fsetxattr(in->fd, xname, buf, n, 0) < 0) {
-	fail:
-		print_file_strerror(in->pf.p, &f->a, "Could not write extended attributes");
-		goto out;
-	}
-	n += 1 /* NUL */;
-
-	if (oldn < n) {
-		size_t size = 0;
-		for (enum Metadata m = 0; m < M_NB; ++m)
-			if (size < f->metadata[m])
-				size = f->metadata[m];
-		size += strlen(f->a.url + size) + 1 /* NUL */;
-
-		void *p = realloc(f->a.url, size - oldn + n);
-		if (!p)
-			goto fail;
-		f->a.url = p;
-
-		if (str) {
-			memmove(str, str + oldn, size - (f->metadata[xm] + oldn));
-			for (enum Metadata m = 0; m < M_NB; ++m)
-				if (f->metadata[xm] < f->metadata[m])
-					f->metadata[m] -= oldn;
-		}
-
-		f->metadata[xm] = size - n;
-		str = f->a.url + f->metadata[xm];
-	}
-
-	memcpy(str, buf, n);
-out:
-	xassert(!pthread_mutex_unlock(&file_lock));
-}
-
-static void
 print_format(void)
 {
 	fprintf(tty, "%s -> %s"LF,
@@ -2884,6 +2881,55 @@ update_input_info(void)
 	birdlock_wr_release(&source_info.lock);
 }
 
+static void
+record_play(Input const *in)
+{
+	if (!writable || in->fd < 0)
+		return;
+
+	enum Metadata m;
+	char const *name;
+
+	unsigned percent = cur_duration ? atomic_load_lax(&cur_pts) * 100 / cur_duration : 0;
+	if (percent <= 10)
+		return; /* Noise. */
+	else if (percent < 60)
+		m = M_skip_count, name = XATTR_SKIP_COUNT;
+	else
+		m = M_play_count, name = XATTR_PLAY_COUNT;
+
+	xassert(!pthread_mutex_lock(&file_lock));
+	File *f = in->pf.f;
+
+	char buf[50];
+	int n;
+
+	uint64_t times = f->metadata[m]
+		? strtoull(f->a.url + f->metadata[m], NULL, 10)
+		: 0;
+
+	++times;
+
+	n = snprintf(buf, sizeof buf, "%"PRIu64, times);
+	if (fsetxattr(in->fd, name, buf, n, 0) < 0) {
+	fail:
+		print_file_strerror(in->pf.p, &f->a, "Cannot write extended attribute");
+		goto out;
+	}
+
+	if (M_play_count == m) {
+		n = strftime(buf, sizeof buf, "%F",
+				gmtime(&(time_t){ time(NULL) }));
+		if (fsetxattr(in->fd, XATTR_LAST_PLAY, buf, n, 0) < 0)
+			goto fail;
+	}
+
+	read_metadata(in);
+
+out:
+	xassert(!pthread_mutex_unlock(&file_lock));
+}
+
 static void *
 source_worker(void *arg)
 {
@@ -2904,7 +2950,6 @@ source_worker(void *arg)
 	}
 
 	int discont = 0;
-	int sought = 0;
 
 	buffer_full_bytes = buffer_bytes_max;
 
@@ -2920,17 +2965,6 @@ source_worker(void *arg)
 			xassert(!pthread_mutex_lock(&file_lock));
 			/* Maybe deleted. */
 			if (likely(seek_file0)) {
-				if (!sought && 0 <= in0.fd) {
-					unsigned percent = cur_duration ? atomic_load_lax(&cur_pts) * 100 / cur_duration : 0;
-					if (percent < 20)
-						/* Ignore. */;
-					else if (percent < 80)
-						increment_xattr(&in0, XATTR_SKIP_COUNT, M_skip_count);
-					else
-						increment_xattr(&in0, XATTR_PLAY_COUNT, M_play_count);
-				}
-				sought = 0;
-
 				close_input(&in0);
 
 				atomic_store_lax(&in0.pf.f, seek_file0);
@@ -2972,7 +3006,6 @@ source_worker(void *arg)
 			target_pts = av_rescale(target_pts,
 					in0.s.audio->time_base.den,
 					in0.s.audio->time_base.num);
-			sought = 1;
 
 			if (seek_buffer(target_pts)) {
 				if (locked)
@@ -3054,9 +3087,11 @@ source_worker(void *arg)
 			if (SS_RUNNING != source_state &&
 			    /* Buffer consumed. */
 			    atomic_load_lax(&buffer_head) == atomic_load_lax(&buffer_tail))
+			{
 				/* TODO: finish_input|in == in0 && next_cmd == in_next_cmd (g) => in = in1|emit next_cmd */
 				/* Seek commands should fill next_in first. */
 				write(control[1], (char const[]){ CONTROL('J') }, 1);
+			}
 
 		stop:
 			atomic_store_lax(&source_state, SS_STOPPED);
@@ -3520,12 +3555,12 @@ open_visual_search(void)
 	fputc('\n', stream);
 
 	PlaylistFile cur = get_current_pf();
-	for (enum MetadataX m = 0; m < MX_NB; ++m) {
-		char const *value = cur.f ? get_metadata(cur.p, cur.f, m) : NULL;
+	for (enum MetadataX i = 0; i < MX_NB; ++i) {
+		char const *value = cur.f ? get_metadata(cur.p, cur.f, i) : NULL;
 		if (!value || !*value)
 			continue;
 
-		fputc(METADATA_LETTERS[m], stream);
+		fputc(METADATA_LETTERS[i], stream);
 		fputc('=', stream);
 		fputc('\'', stream);
 		fputs(value, stream);
@@ -3561,12 +3596,12 @@ open_visual_search(void)
 			"# VALUE ::= WORD\n"
 			"# KEY ::= {\n"
 			);
-	for (enum MetadataX m = 0; m < MX_NB; ++m) {
-		char const *value = cur.f ? get_metadata(cur.p, cur.f, m) : NULL;
+	for (enum MetadataX i = 0; i < MX_NB; ++i) {
+		char const *value = cur.f ? get_metadata(cur.p, cur.f, i) : NULL;
 		fprintf(stream, "#   %c=%-*s%s\n",
-				METADATA_LETTERS[m],
-				value && *value ? (int)sizeof METADATA_NAMES[m] : 0,
-				METADATA_NAMES[m],
+				METADATA_LETTERS[i],
+				value && *value ? (int)sizeof METADATA_NAMES[i] : 0,
+				METADATA_NAMES[i],
 				value ? value : "");
 	}
 	fprintf(stream,
@@ -3957,11 +3992,11 @@ do_cmd(char c)
 
 			char name[5 + sizeof *METADATA_NAMES] = "MUCK_";
 
-			for (enum MetadataX m = 0; m < MX_NB; ++m) {
-				memcpy(name + 5, METADATA_NAMES[m], sizeof *METADATA_NAMES);
-				char const *value = get_metadata(playlist, f, m);
+			for (enum MetadataX i = 0; i < MX_NB; ++i) {
+				memcpy(name + 5, METADATA_NAMES[i], sizeof *METADATA_NAMES);
+				char const *value = get_metadata(playlist, f, i);
 				if (value)
-					setenv(name, f->a.url + f->metadata[m], 0);
+					setenv(name, f->a.url + f->metadata[i], 0);
 			}
 
 			char filename[2] = { c };
