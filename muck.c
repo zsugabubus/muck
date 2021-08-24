@@ -333,21 +333,21 @@ static enum SourceState {
 } _Atomic ALIGNED_ATOMIC source_state;
 
 /**
- * Producer buffer: Cyclic list of AVFrames.
+ * Producer buffer.
  */
 static AVFrame *buffer[UINT16_MAX + 1];
 static uint16_t _Atomic ALIGNED_ATOMIC buffer_head;
 static uint16_t _Atomic ALIGNED_ATOMIC buffer_tail;
 /**
- * buffer_hair..buffer_head: Maybe alloced, reusable frames.
- * buffer_tail..buffer_hair: NULLs.
+ * buffer_reap..buffer_head: Maybe alloced, reusable frames.
+ * buffer_tail..buffer_reap: NULLs.
  */
-static uint16_t buffer_hair;
+static uint16_t buffer_reap;
 
 static int64_t _Atomic ALIGNED_ATOMIC cur_pts, cur_duration;
 static atomic_uchar ALIGNED_ATOMIC paused;
 
-static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER; /**< Only for non-main threads. */
+static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
 static Playlist master;
 
 static uint8_t cur_filter[2]; /**< .[live] is the currently used filter. */
@@ -3181,10 +3181,10 @@ source_worker(void *arg)
 
 		if (!frame) {
 			for (uint16_t to = atomic_load_lax(&buffer_head);
-			     buffer_hair < to;
-			     ++buffer_hair)
-				if ((frame = buffer[buffer_hair])) {
-					buffer[buffer_hair++] = NULL;
+			     buffer_reap < to;
+			     ++buffer_reap)
+				if ((frame = buffer[buffer_reap])) {
+					buffer[buffer_reap++] = NULL;
 					break;
 				}
 
