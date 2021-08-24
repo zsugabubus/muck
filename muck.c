@@ -4078,8 +4078,12 @@ main(int argc, char **argv)
 
 	/* Setup ended, can load files now. */
 	char const *startup_cmd = NULL;
-	for (int c; 0 <= (c = getopt(argc, argv, "x:a:c:f:n:m:wd"));)
+	for (int c; 0 <= (c = getopt(argc, argv, "q:x:a:c:f:n:m:wd"));)
 		switch (c) {
+		case 'q':
+			search_history[0] = strdup(optarg);
+			break;
+
 		case 'x':
 			startup_cmd = optarg;
 			break;
@@ -4161,6 +4165,9 @@ main(int argc, char **argv)
 			read_file(&master, a);
 		}
 	}
+
+	if (search_history[0])
+		search_file(search_history[0]);
 
 	if (startup_cmd)
 		do_cmd_str(startup_cmd);
