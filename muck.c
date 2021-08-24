@@ -70,11 +70,7 @@
 	 !memcmp(haystack + haystack##_size - strlen(needle), needle, strlen(needle)) && \
 	 (haystack##_size -= strlen(needle), 1))
 
-static char const XATTR_COMMENT[] = "user.comment";
 static char const XATTR_LAST_PLAY[] = "user.last_play";
-static char const XATTR_PLAY_COUNT[] = "user.play_count";
-static char const XATTR_SKIP_COUNT[] = "user.skip_count";
-static char const XATTR_TAGS[] = "user.tags";
 
 #define ALIGNED_ATOMIC _Alignas(64)
 
@@ -130,14 +126,10 @@ static char const XATTR_TAGS[] = "user.tags";
 	xmacro('C', catalog) \
 	xmacro('y', date) \
 	xmacro('o', codec) \
-	xmacro('c', play_count) \
-	xmacro('h', last_play) /* Last heard. */ \
-	xmacro('s', skip_count) \
-	/* xmacro('e', added) */ \
+	xmacro('l', last_play) \
 	xmacro('h', mtime) \
 	xmacro('d', duration) \
-	xmacro('r', user_comment) \
-	xmacro('z', tags)
+	xmacro('z', comment)
 
 /* Extra metadata-like stuff. */
 #define METADATAX \
@@ -263,7 +255,8 @@ typedef struct {
 		uint64_t nb_unscanned;
 		uint64_t nb_untagged;
 	} total, filtered;
-} Stat;
+	int64_t listen_duration;
+} Statistics;
 
 typedef struct {
 	AVFormatContext *format_ctx;
@@ -295,6 +288,7 @@ static char const *ofilename = NULL;
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
 static unsigned _Atomic cur_track;
+static int64_t _Atomic listen_duration;
 static atomic_uchar ALIGNED_ATOMIC dump_in0;
 
 static struct {
@@ -389,6 +383,12 @@ print_error(char const *msg, ...)
 	fputs("\e[m\n", tty);
 	funlockfile(tty);
 	va_end(ap);
+}
+
+static void
+print_strerror(char const *msg)
+{
+	print_error("%s: %s", msg, strerror(errno));
 }
 
 static void
@@ -1406,21 +1406,15 @@ read_metadata(Input const *in)
 			goto fail_too_long;
 	}
 
-#if 0
 	/* Preserve. */
-	if (f->metadata[M_added]) {
-		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_added,
-				"%s", f->a.url + f->metadata[M_added]);
+	if (f->metadata[M_comment]) {
+		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_comment,
+				"%s", f->a.url + f->metadata[M_comment]);
 		if (rc < 0)
 			goto fail_too_long;
 	}
-#endif
 
-	if (fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_user_comment, XATTR_COMMENT) < 0 ||
-	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_last_play, XATTR_LAST_PLAY) < 0 ||
-	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_play_count, XATTR_PLAY_COUNT) < 0 ||
-	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_skip_count, XATTR_SKIP_COUNT) < 0 ||
-	    fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_tags, XATTR_TAGS) < 0)
+	if (fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_last_play, XATTR_LAST_PLAY) < 0)
 		goto fail_too_long;
 
 	if (!playlist->modified) {
@@ -1476,7 +1470,6 @@ update_cover(Input const *in)
 	if (fd < 0)
 		return;
 
-	void *p;
 	uint8_t const *data;
 	int data_size;
 
@@ -1497,11 +1490,12 @@ update_cover(Input const *in)
 
 	ftruncate(fd, data_size);
 
-	p = mmap(NULL, data_size, PROT_WRITE, MAP_SHARED, fd, 0);
+	void *p = mmap(NULL, data_size, PROT_WRITE, MAP_SHARED, fd, 0);
 	if (MAP_FAILED != p) {
 		memcpy(p, data, data_size);
 		munmap(p, data_size);
 	} else {
+		print_strerror("Could not write cover");
 		ftruncate(fd, 0);
 	}
 
@@ -2072,16 +2066,14 @@ print_file(File const *f, FILE *stream, int highlight)
 			fprintf(stream, " {%s}", str);
 	}
 
-	if (M(play_count))
-		fprintf(stream, " \e[37mplays=%s\e[m", str);
-	if (M(skip_count))
-		fprintf(stream, " \e[37mskips=%s\e[m", str);
+	if (M(comment))
+		fprintf(stream, " \e[37m%s\e[m", str);
 
 #undef M
 
 	if (highlight)
 		fputs(" \e[1;33m<\e[m", tty);
-	fputc('\n', stream);
+	fputs("\e[K\n", stream);
 
 	funlockfile(stream);
 }
@@ -2122,7 +2114,7 @@ has_metadata(File const *f)
 }
 
 static int
-collect_stat(AnyFile *a, Stat *s)
+collect_stat(AnyFile *a, Statistics *s)
 {
 	if (F_FILE < a->type) {
 		Playlist *playlist = (void *)a;
@@ -2161,15 +2153,16 @@ collect_stat(AnyFile *a, Stat *s)
 }
 
 static void
-calc_stat(Stat *s)
+calc_stat(Statistics *s)
 {
-	*s = (Stat){
+	*s = (Statistics){
 		.total = {
 			.nb_files = master.child_filter_count[cur_filter[1]],
 		},
 		.filtered = {
 			.nb_files = master.child_filter_count[0],
 		},
+		.listen_duration = atomic_load_lax(&listen_duration) / AV_TIME_BASE,
 	};
 	collect_stat(&master.a, s);
 }
@@ -2823,7 +2816,7 @@ print_around(PlaylistFile pf)
 		--to_lim;
 		++lines;
 	}
-	fprintf(tty, "\e[?7h" "\e[%dA", lines + 1);
+	fprintf(tty, "\e[?7h" "\e[%dF", lines + 1);
 	funlockfile(tty);
 }
 
@@ -2882,21 +2875,20 @@ update_input_info(void)
 }
 
 static void
-record_play(Input const *in)
+record_play(Input const *in, int64_t play_duration)
 {
+	if (play_duration < 1)
+		return; /* Noise. */
+
+	int64_t percent = play_duration * 100 / cur_duration;
+
+	fprintf(tty, "Listened for %"PRId64" sec (%3"PRId64"%%)"LF,
+			play_duration, percent);
+
 	if (!writable || in->fd < 0)
 		return;
 
-	enum Metadata m;
-	char const *name;
-
-	unsigned percent = cur_duration ? atomic_load_lax(&cur_pts) * 100 / cur_duration : 0;
-	if (percent <= 10)
-		return; /* Noise. */
-	else if (percent < 60)
-		m = M_skip_count, name = XATTR_SKIP_COUNT;
-	else
-		m = M_play_count, name = XATTR_PLAY_COUNT;
+	return;
 
 	xassert(!pthread_mutex_lock(&file_lock));
 	File *f = in->pf.f;
@@ -2904,24 +2896,11 @@ record_play(Input const *in)
 	char buf[50];
 	int n;
 
-	uint64_t times = f->metadata[m]
-		? strtoull(f->a.url + f->metadata[m], NULL, 10)
-		: 0;
-
-	++times;
-
-	n = snprintf(buf, sizeof buf, "%"PRIu64, times);
-	if (fsetxattr(in->fd, name, buf, n, 0) < 0) {
-	fail:
+	n = strftime(buf, sizeof buf, "%F",
+			gmtime(&(time_t){ time(NULL) }));
+	if (fsetxattr(in->fd, XATTR_LAST_PLAY, buf, n, 0) < 0) {
 		print_file_strerror(in->pf.p, &f->a, "Cannot write extended attribute");
 		goto out;
-	}
-
-	if (M_play_count == m) {
-		n = strftime(buf, sizeof buf, "%F",
-				gmtime(&(time_t){ time(NULL) }));
-		if (fsetxattr(in->fd, XATTR_LAST_PLAY, buf, n, 0) < 0)
-			goto fail;
 	}
 
 	read_metadata(in);
@@ -2949,6 +2928,7 @@ source_worker(void *arg)
 		goto terminate;
 	}
 
+	int64_t begin_listen_ts = 0;
 	int discont = 0;
 
 	buffer_full_bytes = buffer_bytes_max;
@@ -2965,6 +2945,13 @@ source_worker(void *arg)
 			xassert(!pthread_mutex_lock(&file_lock));
 			/* Maybe deleted. */
 			if (likely(seek_file0)) {
+				int64_t cur_listen_ts = atomic_load_lax(&listen_duration);
+				int64_t play_duration =
+					av_rescale(cur_listen_ts - begin_listen_ts,
+							1, AV_TIME_BASE);
+				record_play(&in0, play_duration);
+				begin_listen_ts = cur_listen_ts;
+
 				close_input(&in0);
 
 				atomic_store_lax(&in0.pf.f, seek_file0);
@@ -3303,6 +3290,8 @@ sink_worker(void *arg)
 		frame->pkt_dts = out_dts;
 		frame->pkt_duration = frame->nb_samples *
 			out.audio->time_base.den / frame->sample_rate / out.audio->time_base.num;
+		atomic_store_lax(&listen_duration, listen_duration +
+				frame->nb_samples * AV_TIME_BASE / frame->sample_rate);
 
 		int rc;
 
@@ -3525,7 +3514,7 @@ open_tmpfile(char tmpname[PATH_MAX])
 	int fd = mkostemp(tmpname, O_CLOEXEC);
 	if (fd < 0) {
 	fail:
-		print_error("Failed to create temporary file: %s", strerror(errno));
+		print_strerror("Failed to create temporary file");
 		return NULL;
 	}
 
@@ -3764,31 +3753,39 @@ do_cmd(char c)
 
 	case 'S': /* Statistics. */
 	{
-		Stat s;
+		Statistics s;
 		calc_stat(&s);
 #define I "%20"PRIu64
 #define I2 I " " I
 #define A2(what) s.filtered.what, s.total.what
 #define D(seconds) seconds / (3600 * 24), (unsigned)(seconds / 3600 % 24), (unsigned)(seconds / 60 % 60), (unsigned)(seconds % 60)
 #define PRIduration "%6"PRIu64" days %02u:%02u:%02u"
+#define H(title) "\e[1m" #title "\e[m"
 		fprintf(tty,
-				"                        FILTERED                TOTAL"LF
-				"Files     : "I2"\n"
-				"Playlists : "I2"\n"
-				"Duration  : "PRIduration" "PRIduration"\n"
-				"Unscanned : "I2"\n"
-				"Untagged  : "I2"\n",
+				"\e[J" "\n"
+				"\n"
+				H(LIBRARY)"                  FILTERED                TOTAL\n"
+				" Files     : "I2"\n"
+				" Playlists : "I2"\n"
+				" Duration  : "PRIduration" "PRIduration"\n"
+				" Unscanned : "I2"\n"
+				" Untagged  : "I2"\n"
+				H(SESSION)"\n"
+				" Listen    : "PRIduration
+				"\e[9F",
 				A2(nb_files),
 				A2(nb_playlists),
 				D(s.filtered.duration), D(s.total.duration),
 				A2(nb_unscanned),
-				A2(nb_untagged));
+				A2(nb_untagged),
+				D(s.listen_duration));
 
 #undef I
 #undef I2
 #undef A2
 #undef D
 #undef PRIduration
+#undef H
 	}
 		break;
 
@@ -4105,7 +4102,7 @@ main(int argc, char **argv)
 
 	/* Setup internal communication channel. */
 	if (pipe2(control, O_CLOEXEC) < 0)
-		print_error("Could not open control channel: %s", strerror(errno));
+		print_strerror("Could not open control channel");
 
 	/* Set defaults. */
 	update_input_info();
@@ -4169,7 +4166,7 @@ main(int argc, char **argv)
 
 		    pthread_attr_destroy(&attr))
 		{
-			print_error("Could not create worker thread: %s", strerror(errno));
+			print_strerror("Could not create worker thread");
 			exit(EXIT_FAILURE);
 		}
 
