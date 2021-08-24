@@ -247,15 +247,20 @@ typedef struct {
 	};
 } Clause;
 
+enum {
+	S_FILTERED,
+	S_TOTAL,
+};
+
 typedef struct {
-	struct {
-		uint64_t nb_files;
-		uint64_t nb_playlists;
-		uint64_t duration;
-		uint64_t nb_unscanned;
-		uint64_t nb_untagged;
-	} total, filtered;
-	int64_t listen_duration;
+	uint64_t nb_files[2];
+	uint64_t nb_playlists[2];
+	int64_t duration[2];
+	uint64_t nb_unscanned[2];
+	uint64_t nb_untagged[2];
+
+	int64_t play_duration;
+	uint64_t play_count;
 } Statistics;
 
 typedef struct {
@@ -288,7 +293,8 @@ static char const *ofilename = NULL;
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
 static unsigned _Atomic cur_track;
-static int64_t _Atomic listen_duration;
+static int64_t _Atomic play_duration;
+static uint64_t _Atomic play_count;
 static atomic_uchar ALIGNED_ATOMIC dump_in0;
 
 static struct {
@@ -363,6 +369,7 @@ static int64_t cur_number;
 struct termios saved_termios;
 static int win_height;
 static FILE *tty;
+static char print_clear = '\0';
 
 static int writable;
 
@@ -2114,18 +2121,18 @@ has_metadata(File const *f)
 }
 
 static int
-collect_stat(AnyFile *a, Statistics *s)
+collect_stat(Statistics *s, AnyFile *a)
 {
 	if (F_FILE < a->type) {
 		Playlist *playlist = (void *)a;
 
-		s->total.nb_playlists += &master != playlist;
+		s->nb_playlists[S_TOTAL] += &master != playlist;
 
 		int any = 0;
 		for_each_file()
-			any |= collect_stat(a, s);
+			any |= collect_stat(s, a);
 
-		s->filtered.nb_playlists += any && &master != playlist;
+		s->nb_playlists[S_FILTERED] += any && &master != playlist;
 		return any;
 	}
 
@@ -2135,36 +2142,158 @@ collect_stat(AnyFile *a, Statistics *s)
 		? strtoull(a->url + f->metadata[M_duration], NULL, 10)
 		: 0;
 
-#define COLLECT(type) \
-	s->type.duration += duration; \
-	s->type.nb_unscanned += !f->metadata[M_duration]; \
-	s->type.nb_untagged += f->metadata[M_duration] && !has_metadata(f);
+#define COLLECT(S_type) \
+	s->duration[S_type] += duration; \
+	s->nb_unscanned[S_type] += !f->metadata[M_duration]; \
+	s->nb_untagged[S_type] += f->metadata[M_duration] && !has_metadata(f);
 
-	COLLECT(total);
+	COLLECT(S_TOTAL);
 
 	if (!((UINT32_C(1) << cur_filter[1]) & a->filter_mask))
 		return 0;
 
-	COLLECT(filtered);
+	COLLECT(S_FILTERED);
 
 #undef COLLECT
 
 	return 1;
 }
 
-static void
-calc_stat(Statistics *s)
+static Statistics
+calc_stat(void)
 {
-	*s = (Statistics){
-		.total = {
-			.nb_files = master.child_filter_count[cur_filter[1]],
+	Statistics s = {
+		.nb_files = {
+			[S_TOTAL] = master.child_filter_count[0],
+			[S_FILTERED] = master.child_filter_count[cur_filter[1]],
 		},
-		.filtered = {
-			.nb_files = master.child_filter_count[0],
-		},
-		.listen_duration = atomic_load_lax(&listen_duration) / AV_TIME_BASE,
+		.play_duration = atomic_load_lax(&play_duration) / AV_TIME_BASE,
+		.play_count = atomic_load_lax(&play_count),
 	};
-	collect_stat(&master.a, s);
+	collect_stat(&s, &master.a);
+	return s;
+}
+
+static void
+print_stat(void)
+{
+	enum { TABLE_COLUMN_WIDTH = 20, };
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+	static const struct Descriptor {
+		char str[9];
+		char type;
+		uint8_t offset;
+		uint8_t count;
+	} DESCRIPTION[] = {
+		{ "", 'T', },
+		{ "", 'T', },
+
+		{ "LIBRARY",   's', },
+		{ "FILTERED",  'h', },
+		{ "TOTAL",     'H', },
+
+		{ "Files",     'N', offsetof(Statistics, nb_files),     2, },
+		{ "Playlists", 'N', offsetof(Statistics, nb_playlists), 2, },
+		{ "Duration",  'D', offsetof(Statistics, duration),     2, },
+		{ "Unscanned", 'N', offsetof(Statistics, nb_unscanned), 2, },
+		{ "Untagged",  'N', offsetof(Statistics, nb_untagged),  2, },
+
+		{ "SESSION",   'S', },
+
+		{ "Played",    'D', offsetof(Statistics, play_duration), },
+		{ "Listened",  'N', offsetof(Statistics, play_count), },
+	};
+#pragma GCC diagnostic pop
+
+	Statistics s = calc_stat();
+
+	flockfile(tty);
+	fputs("\e[J", tty);
+
+	int lines = 0;
+	for (struct Descriptor const *d = DESCRIPTION;
+	     d < (&DESCRIPTION)[1];
+	     ++d)
+	{
+		switch (d->type | ' ') {
+		case 't': /* Unformatted text. */
+			fputs(d->str, tty);
+			break;
+
+		case 's': /* Section. */
+			fprintf(tty, "\e[1m%-*.*s\e[m",
+					(int)ARRAY_SIZE(d->str) + 3,
+					(int)ARRAY_SIZE(d->str),
+					d->str);
+			break;
+
+		case 'h': /* Table header. */
+			fprintf(tty, "%*.*s",
+					TABLE_COLUMN_WIDTH,
+					(int)ARRAY_SIZE(d->str),
+					d->str);
+			break;
+
+		default:
+			fprintf(tty, " %-*.*s :",
+					(int)ARRAY_SIZE(d->str),
+					(int)ARRAY_SIZE(d->str),
+					d->str);
+			break;
+		}
+
+		unsigned elem_size = 0;
+		switch (d->type | ' ') {
+		case 'd': /* Duration. */
+			elem_size = sizeof(int64_t);
+			break;
+
+		case 'n': /* Number. */
+			elem_size = sizeof(uint64_t);
+			break;
+		}
+
+		if (elem_size) {
+			unsigned count = 0;
+			do {
+				void *data = (char *)&s + d->offset + elem_size * count;
+				switch (d->type | ' ') {
+				case 'd':
+				{
+					int64_t seconds = *(int64_t *)data;
+					int64_t days = seconds / (3600 * 24);
+					if (days)
+						fprintf(tty, "%*"PRIu64" days",
+								TABLE_COLUMN_WIDTH - 14,
+								days);
+					else
+						fprintf(tty, "%*c", 6 + 1 + 5, 0);
+					fprintf(tty, " %02u:%02u:%02u",
+							(unsigned)(seconds / 3600 % 24),
+							(unsigned)(seconds / 60 % 60),
+							(unsigned)(seconds % 60));
+				}
+					break;
+
+				case 'n':
+					fprintf(tty, "%*"PRIu64,
+							TABLE_COLUMN_WIDTH,
+							*(uint64_t *)data);
+					break;
+				}
+			} while (++count < d->count);
+		}
+
+		if (!(' ' & d->type)) {
+			fputc('\n', tty);
+			++lines;
+		}
+	}
+
+	fprintf(tty, "\e[%dF", lines);
+	funlockfile(tty);
 }
 
 static uint64_t
@@ -2658,8 +2787,6 @@ cleanup:
 			regfree(&clause->reg);
 }
 
-static int progress_printed = 0;
-
 static void
 print_progress(int force)
 {
@@ -2715,8 +2842,9 @@ print_progress(int force)
 	}
 
 	fputs(CR, tty);
+	if (!print_clear)
+		print_clear = 'K';
 	funlockfile(tty);
-	progress_printed = 1;
 }
 
 static void
@@ -2817,6 +2945,7 @@ print_around(PlaylistFile pf)
 		++lines;
 	}
 	fprintf(tty, "\e[?7h" "\e[%dF", lines + 1);
+	print_clear = 'J';
 	funlockfile(tty);
 }
 
@@ -2875,15 +3004,18 @@ update_input_info(void)
 }
 
 static void
-record_play(Input const *in, int64_t play_duration)
+record_play(Input const *in, int64_t cur_play_duration)
 {
-	if (play_duration < 1)
+	if (cur_play_duration < 1)
 		return; /* Noise. */
 
-	int64_t percent = play_duration * 100 / cur_duration;
+	int64_t percent = cur_play_duration * 100 / cur_duration;
 
 	fprintf(tty, "Listened for %"PRId64" sec (%3"PRId64"%%)"LF,
-			play_duration, percent);
+			cur_play_duration, percent);
+
+	if (50 <= percent)
+		atomic_store_lax(&play_count, play_count + 1);
 
 	if (!writable || in->fd < 0)
 		return;
@@ -2945,11 +3077,11 @@ source_worker(void *arg)
 			xassert(!pthread_mutex_lock(&file_lock));
 			/* Maybe deleted. */
 			if (likely(seek_file0)) {
-				int64_t cur_listen_ts = atomic_load_lax(&listen_duration);
-				int64_t play_duration =
+				int64_t cur_listen_ts = atomic_load_lax(&play_duration);
+				int64_t cur_play_duration =
 					av_rescale(cur_listen_ts - begin_listen_ts,
 							1, AV_TIME_BASE);
-				record_play(&in0, play_duration);
+				record_play(&in0, cur_play_duration);
 				begin_listen_ts = cur_listen_ts;
 
 				close_input(&in0);
@@ -2964,6 +3096,8 @@ source_worker(void *arg)
 
 				update_input_info();
 
+				print_progress(1);
+
 				/* Otherwise it is just noise. */
 				if (0 <= rc) {
 					if (atomic_load_lax(&auto_w))
@@ -2974,7 +3108,6 @@ source_worker(void *arg)
 					print_file(in0.pf.f, tty, 0);
 				}
 
-				print_progress(1);
 				if (tty)
 					fflush(tty);
 
@@ -3012,6 +3145,7 @@ source_worker(void *arg)
 
 		if (unlikely(!in0.s.codec_ctx) ||
 		    unlikely(SS_STOPPED == source_state) ||
+		    unlikely(atomic_load_lax(&paused)) ||
 		    buffer_bytes_max <= atomic_load_explicit(&buffer_bytes, memory_order_acquire) ||
 		    (unlikely(buffer_tail + 1 == atomic_load_lax(&buffer_head)) &&
 		     (atomic_store_lax(&buffer_full_bytes, atomic_load_lax(&buffer_bytes)), 1)))
@@ -3290,7 +3424,7 @@ sink_worker(void *arg)
 		frame->pkt_dts = out_dts;
 		frame->pkt_duration = frame->nb_samples *
 			out.audio->time_base.den / frame->sample_rate / out.audio->time_base.num;
-		atomic_store_lax(&listen_duration, listen_duration +
+		atomic_store_lax(&play_duration, play_duration +
 				frame->nb_samples * AV_TIME_BASE / frame->sample_rate);
 
 		int rc;
@@ -3752,41 +3886,7 @@ do_cmd(char c)
 		break;
 
 	case 'S': /* Statistics. */
-	{
-		Statistics s;
-		calc_stat(&s);
-#define I "%20"PRIu64
-#define I2 I " " I
-#define A2(what) s.filtered.what, s.total.what
-#define D(seconds) seconds / (3600 * 24), (unsigned)(seconds / 3600 % 24), (unsigned)(seconds / 60 % 60), (unsigned)(seconds % 60)
-#define PRIduration "%6"PRIu64" days %02u:%02u:%02u"
-#define H(title) "\e[1m" #title "\e[m"
-		fprintf(tty,
-				"\e[J" "\n"
-				"\n"
-				H(LIBRARY)"                  FILTERED                TOTAL\n"
-				" Files     : "I2"\n"
-				" Playlists : "I2"\n"
-				" Duration  : "PRIduration" "PRIduration"\n"
-				" Unscanned : "I2"\n"
-				" Untagged  : "I2"\n"
-				H(SESSION)"\n"
-				" Listen    : "PRIduration
-				"\e[9F",
-				A2(nb_files),
-				A2(nb_playlists),
-				D(s.filtered.duration), D(s.total.duration),
-				A2(nb_unscanned),
-				A2(nb_untagged),
-				D(s.listen_duration));
-
-#undef I
-#undef I2
-#undef A2
-#undef D
-#undef PRIduration
-#undef H
-	}
+		print_stat();
 		break;
 
 	case 'I':
@@ -3814,8 +3914,6 @@ do_cmd(char c)
 		if (n) {
 			atomic_store_lax(&cur_track, (cur_track + 1) % n);
 			play_file(atomic_load_lax(&in0.pf.f), atomic_load_lax(&cur_pts));
-		} else {
-			print_error("No audio tracks are found");
 		}
 	}
 		break;
@@ -3872,6 +3970,7 @@ do_cmd(char c)
 	case 's': /* Set. */
 	{
 		static int64_t s_number = 0;
+
 		pf = seek_playlist(&master, NULL, use_number(&s_number), SEEK_SET);
 		/* Stay close to file, even if it fails to play. */
 		if ('p' != seek_cmd && 'n' != seek_cmd)
@@ -4032,9 +4131,11 @@ log_cb(void *ctx, int level, const char *format, va_list ap)
 	if (av_log_get_level() < level || !tty)
 		return;
 
-	if (progress_printed) {
-		progress_printed = 0;
-		fputs("\e[K", tty);
+	flockfile(tty);
+	if (print_clear) {
+		fputs("\e[", tty);
+		fputc(print_clear, tty);
+		print_clear = '\0';
 	}
 
 	if (level <= AV_LOG_ERROR)
@@ -4042,6 +4143,7 @@ log_cb(void *ctx, int level, const char *format, va_list ap)
 	vfprintf(tty, format, ap);
 	if (level <= AV_LOG_ERROR)
 		fputs("\e[m", tty);
+	funlockfile(tty);
 }
 
 int
