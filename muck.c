@@ -3100,12 +3100,12 @@ source_worker(void *arg)
 
 				/* Otherwise it is just noise. */
 				if (0 <= rc) {
-					if (atomic_load_lax(&auto_w))
-						print_around(in0.pf);
 					if (atomic_load_lax(&auto_i))
 						print_format();
 					print_now_playing();
 					print_file(in0.pf.f, tty, 0);
+					if (atomic_load_lax(&auto_w))
+						print_around(in0.pf);
 				}
 
 				if (tty)
