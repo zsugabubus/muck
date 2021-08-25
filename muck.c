@@ -2985,6 +2985,26 @@ seek_buffer(int64_t target_pts)
 }
 
 static void
+update_title(File const *f)
+{
+	if (!f)
+		return;
+
+	flockfile(tty);
+	fputs("\e]0;", tty);
+	if (f->metadata[M_title]) {
+		/* Note that metadata is free from control characters. */
+		fputs(f->a.url + f->metadata[M_title], tty);
+		if (f->metadata[M_version])
+			fprintf(tty, " (%s)", f->a.url + f->metadata[M_version]);
+	} else {
+		fputs(f->a.url, tty);
+	}
+	fputc('\a', tty);
+	funlockfile(tty);
+}
+
+static void
 update_input_info(void)
 {
 	char *buf = source_info.buf[birdlock_wr_acquire(&source_info.lock)];
@@ -3001,6 +3021,8 @@ update_input_info(void)
 			sbprintf(&buf, &n, "; cover_front(none)");
 	}
 	birdlock_wr_release(&source_info.lock);
+
+	update_title(in0.pf.f);
 }
 
 static void
