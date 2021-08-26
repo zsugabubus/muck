@@ -382,6 +382,9 @@ get_playlist_name(Playlist const *playlist)
 static void
 print_error(char const *msg, ...)
 {
+	if (!tty)
+		return;
+
 	va_list ap;
 	va_start(ap, msg);
 	flockfile(tty);
@@ -415,6 +418,12 @@ print_file_error(Playlist const *parent, AnyFile const *a, char const *msg, char
 			error_msg ? ": " : "",
 			error_msg ? error_msg : ""
 	);
+}
+
+static void
+print_averror(char const *msg, int err)
+{
+	print_error("%s: %s", msg, av_err2str(err));
 }
 
 static void
@@ -910,7 +919,7 @@ open_file(Playlist *parent, AnyFile *a)
 {
 	int fd = openat(parent->dirfd, a->url, O_CLOEXEC | O_RDONLY);
 	if (fd < 0) {
-		print_file_strerror(parent, a, "Cannot open file");
+		print_file_strerror(parent, a, "Could not open file");
 		return -1;
 	}
 
@@ -1161,9 +1170,7 @@ close_output(void)
 	if (out.format_ctx) {
 		int rc = av_write_trailer(out.format_ctx);
 		if (rc < 0)
-			av_log(out.format_ctx, AV_LOG_ERROR,
-					"Could not write output file trailer: %s\n",
-					av_err2str(rc));
+			print_averror("Could not close output", rc);
 	}
 
 	if (out.codec_ctx)
@@ -1538,8 +1545,7 @@ open_input(Input *in)
 
 	rc = avformat_open_input(&in->s.format_ctx, url, NULL, NULL);
 	if (rc < 0) {
-		print_file_averror(playlist, &f->a,
-				"Could not open input stream", rc);
+		print_file_averror(playlist, &f->a, "Could not open input", rc);
 		return -1;
 	}
 
@@ -1610,8 +1616,7 @@ open_input(Input *in)
 	/* Initialize the stream parameters with demuxer information. */
 	rc = avcodec_parameters_to_context(in->s.codec_ctx, in->s.audio->codecpar);
 	if (rc < 0) {
-		print_file_averror(playlist, &f->a,
-				"Could not initalize codec parameters", rc);
+		print_file_averror(playlist, &f->a, "Could not initalize codec parameters", rc);
 		return -1;
 	}
 
@@ -1726,7 +1731,7 @@ configure_graph(AVBufferSrcParameters *pars)
 	    (rc = avfilter_init_str(format_ctx, NULL)) < 0 ||
 	    (rc = avfilter_init_str(buffersink_ctx, NULL)) < 0)
 	{
-		error_msg = "Cannot initialize filters";
+		error_msg = "Could not initialize filters";
 		goto out;
 	}
 
@@ -1747,19 +1752,19 @@ configure_graph(AVBufferSrcParameters *pars)
 	sink_end->filter_ctx = format_ctx;
 
 	if ((rc = avfilter_link(sink_end->filter_ctx, 0, buffersink_ctx, 0)) < 0) {
-		error_msg = "Cannot create link";
+		error_msg = "Could not create link";
 		goto out;
 	}
 
 	rc = avfilter_graph_parse_ptr(graph, graph_descr,
 				&sink_end, &src_end, NULL);
 	if (rc < 0) {
-		error_msg = "Cannot parse filtergraph";
+		error_msg = "Could not parse filtergraph";
 		goto out;
 	}
 
 	if ((rc = avfilter_graph_config(graph, NULL)) < 0) {
-		error_msg = "Cannot configure filtergraph";
+		error_msg = "Could not configure filtergraph";
 		goto out;
 	}
 
@@ -1799,7 +1804,7 @@ configure_output(AVFrame const *frame)
 		? avcodec_find_encoder(av_get_pcm_codec(frame->format, -1))
 		: avcodec_find_encoder_by_name(ocodec);
 	if (!codec) {
-		assert(!"no codec");
+		print_error("Could not find encoder");
 		return -1;
 	}
 
@@ -1817,22 +1822,30 @@ configure_output(AVFrame const *frame)
 	int rc;
 
 	rc = avformat_alloc_output_context2(&out.format_ctx, NULL, oformat_name, ofilename);
-	if (rc < 0)
+	if (rc < 0) {
+		print_averror("Could not allocate output", rc);
 		return -1;
+	}
 
 	if (!(AVFMT_NOFILE & out.format_ctx->oformat->flags)) {
 		rc = avio_open(&out.format_ctx->pb, ofilename, AVIO_FLAG_WRITE);
-		if (rc < 0)
+		if (rc < 0) {
+			print_averror("Could not open output filename", rc);
 			return -1;
+		}
 	}
 
 	AVStream *stream;
 	/* Create a new audio stream in the output file container. */
-	if (!(stream = avformat_new_stream(out.format_ctx, NULL)))
+	if (!(stream = avformat_new_stream(out.format_ctx, NULL))) {
+		print_averror("Could not allocate output stream", rc);
 		return -1;
+	}
 
-	if (!(out.codec_ctx = avcodec_alloc_context3(codec)))
+	if (!(out.codec_ctx = avcodec_alloc_context3(codec))) {
+		print_averror("Could not allocate encoder", rc);
 		return -1;
+	}
 
 	if (out.format_ctx->flags & AVFMT_GLOBALHEADER)
 		out.codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -1848,11 +1861,18 @@ configure_output(AVFrame const *frame)
 	if (out.format_ctx->oformat->flags & AVFMT_GLOBALHEADER)
 		out.codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-	if (/* Open the encoder for the audio stream to use it later. */
-	    (rc = avcodec_open2(out.codec_ctx, codec, NULL)) < 0 ||
-	    (rc = avcodec_parameters_from_context(stream->codecpar, out.codec_ctx)) < 0 ||
-	    (rc = avformat_write_header(out.format_ctx, NULL)) < 0)
+	if ((rc = avcodec_open2(out.codec_ctx, codec, NULL)) < 0 ||
+	    (rc = avcodec_parameters_from_context(stream->codecpar, out.codec_ctx)) < 0)
+	{
+		print_averror("Could not open encoder", rc);
 		return -1;
+	}
+
+	rc = avformat_write_header(out.format_ctx, NULL);
+	if (rc < 0) {
+		print_averror("Could not open output", rc);
+		return -1;
+	}
 
 	out.audio = out.format_ctx->streams[0];
 
@@ -3057,7 +3077,7 @@ record_play(Input const *in, int64_t cur_play_duration)
 	n = strftime(buf, sizeof buf, "%F",
 			gmtime(&(time_t){ time(NULL) }));
 	if (fsetxattr(in->fd, XATTR_LAST_PLAY, buf, n, 0) < 0) {
-		print_file_strerror(in->pf.p, &f->a, "Cannot write extended attribute");
+		print_file_strerror(in->pf.p, &f->a, "Could not write extended attribute");
 		goto out;
 	}
 
@@ -3165,8 +3185,10 @@ source_worker(void *arg)
 			/* Maybe interesting: out.codec_ctx->delay. */
 
 			avcodec_flush_buffers(in0.s.codec_ctx);
-			if (avformat_seek_file(in0.s.format_ctx, in0.s.audio->index, 0, target_pts, target_pts, 0) < 0)
-				av_log(in0.s.format_ctx, AV_LOG_ERROR, "Could not seek\n");
+			rc = avformat_seek_file(in0.s.format_ctx, in0.s.audio->index,
+					0, target_pts, target_pts, 0);
+			if (rc < 0)
+				print_averror("Could not seek", rc);
 		}
 
 		if (unlikely(!in0.s.codec_ctx) ||
@@ -3228,8 +3250,7 @@ source_worker(void *arg)
 		rc = av_read_frame(in->s.format_ctx, pkt);
 		if (unlikely(rc < 0)) {
 			if (AVERROR_EOF != rc)
-				av_log(in->s.format_ctx, AV_LOG_ERROR, "Could not read frame: %s\n",
-						av_err2str(rc));
+				print_averror("Could not read frame", rc);
 
 			if (SS_RUNNING != source_state &&
 			    /* Buffer consumed. */
@@ -3302,8 +3323,7 @@ source_worker(void *arg)
 			if (tty)
 				fflush(tty);
 		} else if (AVERROR(EAGAIN) != rc)
-			av_log(in->s.format_ctx, AV_LOG_ERROR, "Could not decode frame: %s\n",
-					av_err2str(rc));
+			print_averror("Could not decode frame: %s\n", rc);
 	}
 
 terminate:
@@ -3432,8 +3452,8 @@ sink_worker(void *arg)
 					pow((desired_volume <= 0 ? 0 : desired_volume) / 100., M_E));
 			if (avfilter_graph_send_command(graph, "volume", "volume", arg, NULL, 0, 0) < 0) {
 				if (!avfilter_graph_get_filter(graph, "volume"))
-					av_log(graph, AV_LOG_ERROR, "No 'volume' filter\n");
-				av_log(graph, AV_LOG_ERROR, "Cannot set volume\n");
+					print_error("Cannot find 'volume' filter");
+				print_error("Could not set volume");
 			}
 		}
 
@@ -3457,22 +3477,16 @@ sink_worker(void *arg)
 
 		rc = av_buffersrc_add_frame_flags(buffer_ctx, frame, AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
 		if (unlikely(rc < 0))
-			av_log(graph, AV_LOG_ERROR,
-					"Could not push frame into filtergraph: %s\n",
-					av_err2str(rc));
+			print_averror("Could not push frame into filtergraph", rc);
 
 		rc = av_buffersink_get_frame_flags(buffersink_ctx, frame, 0);
 		if (unlikely(rc < 0))
-			av_log(graph, AV_LOG_ERROR,
-					"Could not pull frame from filtergraph: %s\n",
-					av_err2str(rc));
+			print_averror("Could not pull frame from filtergraph", rc);
 
 		/* Send a frame to encode. */
 		rc = avcodec_send_frame(out.codec_ctx, frame);
 		if (unlikely(rc < 0))
-			av_log(out.format_ctx, AV_LOG_ERROR,
-					"Could not encode frame: %s\n",
-					av_err2str(rc));
+			print_averror("Could not encode frame", rc);
 
 		av_frame_unref(frame);
 
@@ -3482,15 +3496,11 @@ sink_worker(void *arg)
 
 			rc = av_write_frame(out.format_ctx, pkt);
 			if (unlikely(rc < 0))
-				av_log(out.format_ctx, AV_LOG_ERROR,
-						"Could not write encoded frame: %s\n",
-						av_err2str(rc));
+				print_averror("Could not write encoded frame", rc);
 			av_packet_unref(pkt);
 		}
 		if (unlikely(AVERROR(EAGAIN) != rc))
-			av_log(out.format_ctx, AV_LOG_ERROR,
-					"Could not receive encoded frame: %s\n",
-					av_err2str(rc));
+			print_averror("Could not receive encoded frame: %s\n", rc);
 
 		if (tty)
 			fflush(tty);
@@ -4176,7 +4186,7 @@ int
 main(int argc, char **argv)
 {
 	if (!(tty = fopen(ctermid(NULL), "w+e"))) {
-		fprintf(stderr, "Cannot connect to TTY\n");
+		fprintf(stderr, "Could not connect to TTY\n");
 		return EXIT_FAILURE;
 	}
 
