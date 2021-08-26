@@ -2916,6 +2916,10 @@ print_around(PlaylistFile pf)
 
 	int64_t from_offset = 0, to_offset = 0;
 
+	/* No files matched filter. */
+	if (!from_stop.f)
+		return;
+
 	/* Step in direction as much as possible. */
 #define WALK(from, step) \
 	while (0 < from##_lim && from.f != from##_stop.f) \
