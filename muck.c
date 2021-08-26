@@ -3422,25 +3422,16 @@ sink_worker(void *arg)
 		xmacro(sample_rate);
 		xmacro(channel_layout);
 #undef xmacro
-		for (;;) {
-			int rc = configure_output(frame);
-			if ((!rc && unlikely(graph_changed)) ||
-			    unlikely(0 < rc))
-				rc = configure_graph(pars);
-			if (likely(0 <= rc))
-				break;
 
-			print_error("Playback suspended");
+		int rc;
 
-			xassert(!pthread_mutex_lock(&buffer_lock));
-#if CONFIG_VALGRIND
-			if (unlikely(atomic_load_lax(&terminate))) {
-				locked = 1;
-				goto terminate;
-			}
-#endif
-			xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
-			xassert(!pthread_mutex_unlock(&buffer_lock));
+		rc = configure_output(frame);
+		if ((!rc && unlikely(graph_changed)) ||
+		    unlikely(0 < rc))
+			rc = configure_graph(pars);
+		if (unlikely(rc < 0)) {
+			atomic_store_lax(&paused, 1);
+			continue;
 		}
 
 		int desired_volume = atomic_load_lax(&volume);
@@ -3472,8 +3463,6 @@ sink_worker(void *arg)
 			out.audio->time_base.den / frame->sample_rate / out.audio->time_base.num;
 		atomic_store_lax(&play_duration, play_duration +
 				frame->nb_samples * AV_TIME_BASE / frame->sample_rate);
-
-		int rc;
 
 		rc = av_buffersrc_add_frame_flags(buffer_ctx, frame, AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
 		if (unlikely(rc < 0))
