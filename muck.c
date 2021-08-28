@@ -280,6 +280,7 @@ typedef struct {
 } Input;
 
 static pthread_t source_thread, sink_thread;
+static int wakeup_source, wakeup_sink;
 #if CONFIG_VALGRIND
 static int threads_inited;
 static atomic_uchar ALIGNED_ATOMIC terminate;
@@ -325,19 +326,15 @@ static pthread_mutex_t buffer_lock = PTHREAD_MUTEX_INITIALIZER;
  */
 static int64_t _Atomic ALIGNED_ATOMIC buffer_bytes;
 static int64_t buffer_bytes_max = 8 /* MB */ << 20;
-static int64_t _Atomic buffer_full_bytes;
-static enum SourceState {
-	SS_RUNNING,
-	SS_WAITING,
-	SS_STOPPED, /* Avoid nagging source for more. */
-} _Atomic ALIGNED_ATOMIC source_state;
+static int64_t _Atomic buffer_low; /**< When to wake up producer for more frames. */
 
 /**
  * Producer buffer.
+ *
+ * Making it non-resizable simplifies implementation.
  */
 static AVFrame *buffer[UINT16_MAX + 1];
-static uint16_t _Atomic ALIGNED_ATOMIC buffer_head;
-static uint16_t _Atomic ALIGNED_ATOMIC buffer_tail;
+static uint16_t _Atomic ALIGNED_ATOMIC buffer_head, buffer_tail;
 /**
  * buffer_reap..buffer_head: Maybe alloced, reusable frames.
  * buffer_tail..buffer_reap: NULLs.
@@ -1519,7 +1516,7 @@ update_cover(Input const *in)
 	close(fd);
 }
 
-static int
+static void
 open_input(Input *in)
 {
 	memset(&in->s, 0, sizeof in->s);
@@ -1536,7 +1533,7 @@ open_input(Input *in)
 	} else {
 		in->fd = open_file(playlist, &f->a);
 		if (in->fd < 0)
-			return -1;
+			return;
 		sprintf(urlbuf, "pipe:%d", in->fd);
 		url = urlbuf;
 	}
@@ -1546,7 +1543,7 @@ open_input(Input *in)
 	rc = avformat_open_input(&in->s.format_ctx, url, NULL, NULL);
 	if (rc < 0) {
 		print_file_averror(playlist, &f->a, "Could not open input", rc);
-		return -1;
+		return;
 	}
 
 	/* Get information on the input file (number of streams etc.). */
@@ -1586,7 +1583,7 @@ open_input(Input *in)
 
 	if (!in->s.audio) {
 		print_file_error(playlist, &f->a, "No audio streams found", NULL);
-		return -1;
+		return;
 	}
 
 	if (track < nb_audios)
@@ -1604,20 +1601,20 @@ open_input(Input *in)
 	/* Find a decoder for the audio stream. */
 	if (!(codec = avcodec_find_decoder(in->s.audio->codecpar->codec_id))) {
 		print_file_error(playlist, &f->a, "Could not find decoder", NULL);
-		return -1;
+		return;
 	}
 
 	/* Allocate a new decoding context. */
 	if (!(in->s.codec_ctx = avcodec_alloc_context3(codec))) {
 		print_file_error(playlist, &f->a, "Could not allocate codec", NULL);
-		return -1;
+		return;
 	}
 
 	/* Initialize the stream parameters with demuxer information. */
 	rc = avcodec_parameters_to_context(in->s.codec_ctx, in->s.audio->codecpar);
 	if (rc < 0) {
 		print_file_averror(playlist, &f->a, "Could not initalize codec parameters", rc);
-		return -1;
+		return;
 	}
 
 	in->s.codec_ctx->time_base = in->s.audio->time_base;
@@ -1625,11 +1622,10 @@ open_input(Input *in)
 	rc = avcodec_open2(in->s.codec_ctx, codec, NULL);
 	if (rc < 0) {
 		print_file_averror(playlist, &f->a, "Could not open codec", rc);
-		return -1;
+		return;
 	}
 
 	read_metadata(&in[0]);
-	return 0;
 }
 
 static void
@@ -2855,7 +2851,7 @@ print_progress(int force)
 		uint16_t len = atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head);
 		fprintf(tty, " buf:%"PRId64"kB low:%"PRId64"kB usr:%"PRId64"kB max:%"PRId64"kB pkt:%d",
 				atomic_load_lax(&buffer_bytes) / 1024,
-				atomic_load_lax(&buffer_full_bytes) / 2 / 1024,
+				atomic_load_lax(&buffer_low) / 1024,
 				atomic_load_lax(&buffer_bytes_max) / 1024,
 				len ? atomic_load_lax(&buffer_bytes) * (UINT16_MAX + 1) / len / 1024 : -1,
 				len);
@@ -2868,10 +2864,23 @@ print_progress(int force)
 }
 
 static void
-do_wakeup(void)
+do_wakeup(int *which0, int *which1)
 {
 	xassert(!pthread_mutex_lock(&buffer_lock));
+	*which0 = 1;
+	if (which1)
+		*which1 = 1;
 	xassert(!pthread_cond_broadcast(&buffer_wakeup));
+	xassert(!pthread_mutex_unlock(&buffer_lock));
+}
+
+static void
+wait_wakeup(int *which)
+{
+	xassert(!pthread_mutex_lock(&buffer_lock));
+	while (!*which)
+		xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
+	*which = 0;
 	xassert(!pthread_mutex_unlock(&buffer_lock));
 }
 
@@ -2900,11 +2909,14 @@ seek_player(int64_t ts, int whence)
 		abort();
 	}
 
+	int64_t duration = atomic_load_lax(&cur_duration);
 	if (ts < 0)
 		ts = 0;
+	else if (duration < ts)
+		ts = duration;
 
 	atomic_store_lax(&seek_pts, ts);
-	do_wakeup();
+	do_wakeup(&wakeup_source, NULL);
 }
 
 static void
@@ -2972,10 +2984,6 @@ print_around(PlaylistFile pf)
 	print_clear = 'J';
 	funlockfile(tty);
 }
-
-/* static void
-finish_input(Input *in)
-{} */
 
 static int
 seek_buffer(int64_t target_pts)
@@ -3096,10 +3104,6 @@ source_worker(void *arg)
 	pthread_setname_np(pthread_self(), "source");
 #endif
 
-	/* To avoid race condition, we must check all atomic conditions with
-	 * acquired mutex lock before we would fall asleep. */
-	int locked = 0;
-
 	AVPacket *pkt = av_packet_alloc();
 	if (!pkt) {
 		print_error("Could not allocate memory");
@@ -3108,8 +3112,12 @@ source_worker(void *arg)
 
 	int64_t begin_listen_ts = 0;
 	int discont = 0;
-
-	buffer_full_bytes = buffer_bytes_max;
+	enum {
+		S_RUNNING,
+		S_STOPPED,
+		S_STALLED,
+	} state = S_STALLED;
+	int64_t buffer_full_bytes = buffer_bytes_max;
 
 	for (;;) {
 		int rc;
@@ -3136,28 +3144,31 @@ source_worker(void *arg)
 				seek_file0 = NULL;
 				in0.pf.p = get_parent(&master, &in0.pf.f->a);
 
-				rc = open_input(&in0);
-				if (rc < 0)
-					write(control[1], (char const[]){ CONTROL('J') }, 1);
-
+				open_input(&in0);
+				update_cover(&in0);
 				update_input_info();
-
 				print_progress(1);
 
-				/* Otherwise it is just noise. */
-				if (0 <= rc) {
+				/* Otherwise would be noise. */
+				if (in0.s.codec_ctx) {
+					state = S_RUNNING;
+
 					if (atomic_load_lax(&auto_i))
 						print_format();
 					print_now_playing();
 					print_file(in0.pf.f, tty, 0);
 					if (atomic_load_lax(&auto_w))
 						print_around(in0.pf);
+				} else {
+					xassert(!pthread_mutex_unlock(&file_lock));
+					if (tty)
+						fflush(tty);
+					/* Do not flush buffer yet. */
+					goto seek;
 				}
 
 				if (tty)
 					fflush(tty);
-
-				update_cover(&in0);
 
 				seek_buffer(INT64_MIN);
 				atomic_store_lax(&seek_pts, seek_file_pts);
@@ -3167,18 +3178,30 @@ source_worker(void *arg)
 			xassert(!pthread_mutex_unlock(&file_lock));
 		}
 
+		if (unlikely(atomic_load_lax(&dump_in0))) {
+			int old_level = av_log_get_level();
+			av_log_set_level(AV_LOG_DEBUG); /* <-- Not atomic. */
+			if (in0.s.format_ctx)
+				av_dump_format(in0.s.format_ctx, 0, in0.pf.f ? in0.pf.f->a.url : "(none)", 0);
+			av_log_set_level(old_level);
+			/* It is not an exchange. */
+			atomic_store_lax(&dump_in0, 0);
+		}
+
 		int64_t target_pts = atomic_exchange_lax(&seek_pts, AV_NOPTS_VALUE);
 		if (unlikely(AV_NOPTS_VALUE != target_pts && in0.s.codec_ctx)) {
+			/* A cheap way to save decoding a frame immediately but
+			 * still showing something. */
+			atomic_store_lax(&cur_pts, target_pts);
+
+			state = S_RUNNING;
+
 			target_pts = av_rescale(target_pts,
 					in0.s.audio->time_base.den,
 					in0.s.audio->time_base.num);
 
-			if (seek_buffer(target_pts)) {
-				if (locked)
-					goto wakeup_sink_locked;
-				else
-					goto wakeup_sink;
-			}
+			if (seek_buffer(target_pts))
+				goto wakeup_sink;
 
 			discont = 1;
 
@@ -3191,37 +3214,25 @@ source_worker(void *arg)
 				print_averror("Could not seek", rc);
 		}
 
-		if (unlikely(!in0.s.codec_ctx) ||
-		    unlikely(SS_STOPPED == source_state) ||
+		if (unlikely(S_STALLED <= state) ||
 		    unlikely(atomic_load_lax(&paused)) ||
 		    buffer_bytes_max <= atomic_load_explicit(&buffer_bytes, memory_order_acquire) ||
 		    (unlikely(buffer_tail + 1 == atomic_load_lax(&buffer_head)) &&
-		     (atomic_store_lax(&buffer_full_bytes, atomic_load_lax(&buffer_bytes)), 1)))
+		     (buffer_full_bytes = atomic_load_lax(&buffer_bytes), 1)))
 		{
-			if (!locked) {
-				atomic_store_lax(&source_state, SS_WAITING);
-
-			wait:
-				xassert(!pthread_mutex_lock(&buffer_lock));
-				locked = 1;
-				continue;
+		wait:;
+			if (S_STOPPED == state &&
+			    atomic_load_lax(&buffer_head) == atomic_load_lax(&buffer_tail)) {
+			seek:;
+				state = S_STALLED;
+				/* TODO: Seek commands should fill in1 first. */
+				write(control[1], (char const[]){ CONTROL('J') }, 1);
 			}
 
-			xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
-		}
-
-		if (unlikely(atomic_load_lax(&dump_in0))) {
-			int old_level = av_log_get_level();
-			av_log_set_level(AV_LOG_DEBUG); /* <-- Not atomic. */
-			av_dump_format(in0.s.format_ctx, 0, in0.pf.f->a.url, 0);
-			av_log_set_level(old_level);
-			/* It is not an exchange. */
-			atomic_store_lax(&dump_in0, 0);
-		}
-
-		if (locked) {
-			xassert(!pthread_mutex_unlock(&buffer_lock));
-			locked = 0;
+			atomic_store_lax(&buffer_low, S_RUNNING == state
+					? buffer_full_bytes / 2
+					: 0);
+			wait_wakeup(&wakeup_source);
 			continue;
 		}
 
@@ -3240,7 +3251,8 @@ source_worker(void *arg)
 			    unlikely(!(frame = av_frame_alloc())))
 			{
 				print_error("Could not allocate memory");
-				goto stop;
+				state = S_STOPPED;
+				goto wait;
 			}
 			buffer[buffer_tail] = frame;
 		}
@@ -3248,21 +3260,9 @@ source_worker(void *arg)
 		Input *in = &in0;
 
 		rc = av_read_frame(in->s.format_ctx, pkt);
-		if (unlikely(rc < 0)) {
+		if (unlikely(state = rc < 0 ? S_STOPPED : S_RUNNING)) {
 			if (AVERROR_EOF != rc)
 				print_averror("Could not read frame", rc);
-
-			if (SS_RUNNING != source_state &&
-			    /* Buffer consumed. */
-			    atomic_load_lax(&buffer_head) == atomic_load_lax(&buffer_tail))
-			{
-				/* TODO: finish_input|in == in0 && next_cmd == in_next_cmd (g) => in = in1|emit next_cmd */
-				/* Seek commands should fill next_in first. */
-				write(control[1], (char const[]){ CONTROL('J') }, 1);
-			}
-
-		stop:
-			atomic_store_lax(&source_state, SS_STOPPED);
 			goto wait;
 		}
 
@@ -3306,17 +3306,12 @@ source_worker(void *arg)
 						? frame->pts
 						: av_rescale(in0.s.format_ctx->duration, 1, AV_TIME_BASE));
 
-			atomic_store_lax(&source_state, SS_RUNNING);
-
 			int was_empty =
 				atomic_load_lax(&buffer_head) ==
 				atomic_fetch_add_explicit(&buffer_tail, 1, memory_order_release);
 			if (unlikely(was_empty)) {
 			wakeup_sink:
-				xassert(!pthread_mutex_lock(&buffer_lock));
-			wakeup_sink_locked:
-				xassert(!pthread_cond_signal(&buffer_wakeup));
-				xassert(!pthread_mutex_unlock(&buffer_lock));
+				do_wakeup(&wakeup_sink, NULL);
 			}
 
 			print_progress(0);
@@ -3327,8 +3322,6 @@ source_worker(void *arg)
 	}
 
 terminate:
-	if (locked)
-		xassert(!pthread_mutex_unlock(&buffer_lock));
 	av_packet_free(&pkt);
 
 	return NULL;
@@ -3352,7 +3345,6 @@ sink_worker(void *arg)
 	pthread_setname_np(pthread_self(), "sink");
 #endif
 
-	int locked = 0;
 	AVFrame *frame = NULL;
 	int64_t out_dts = 0;
 
@@ -3373,8 +3365,7 @@ sink_worker(void *arg)
 #endif
 
 		if (unlikely(atomic_load_lax(&paused))) {
-			if (!locked)
-				flush_output();
+			flush_output();
 			goto wait;
 		}
 
@@ -3384,17 +3375,7 @@ sink_worker(void *arg)
 
 		if (0) {
 		wait:
-			if (!locked) {
-				xassert(!pthread_mutex_lock(&buffer_lock));
-				locked = 1;
-				continue;
-			}
-			xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
-		}
-
-		if (locked) {
-			xassert(!pthread_mutex_unlock(&buffer_lock));
-			locked = 0;
+			wait_wakeup(&wakeup_sink);
 			continue;
 		}
 
@@ -3405,15 +3386,13 @@ sink_worker(void *arg)
 				memory_order_relaxed, memory_order_relaxed)))
 			continue;
 
+		int rc;
+
 		int64_t rem_bytes = atomic_fetch_sub_lax(&buffer_bytes, frame->pkt_size) - frame->pkt_size;
 		assert(0 <= rem_bytes);
-		if ((rem_bytes <= atomic_load_lax(&buffer_full_bytes) / 2 &&
-		     SS_WAITING == atomic_load_lax(&source_state)) ||
-		    !rem_bytes)
-		{
-			if (unlikely(AV_LOG_DEBUG <= av_log_get_level()))
-				fprintf(tty, "Requesting more bytes %ld %ld\n", rem_bytes , atomic_load_lax(&buffer_full_bytes) / 2);
-			do_wakeup();
+		if (rem_bytes <= atomic_load_lax(&buffer_low)) {
+			atomic_store_lax(&buffer_low, INT64_MIN);
+			do_wakeup(&wakeup_source, NULL);
 		}
 
 		int graph_changed = 0;
@@ -3422,8 +3401,6 @@ sink_worker(void *arg)
 		xmacro(sample_rate);
 		xmacro(channel_layout);
 #undef xmacro
-
-		int rc;
 
 		rc = configure_output(frame);
 		if ((!rc && unlikely(graph_changed)) ||
@@ -3496,8 +3473,6 @@ sink_worker(void *arg)
 	}
 
 terminate:
-	if (locked)
-		xassert(!pthread_mutex_unlock(&buffer_lock));
 	av_free(pars);
 	av_frame_free(&frame);
 	av_packet_free(&pkt);
@@ -3523,7 +3498,7 @@ do_cleanup(void)
 #if CONFIG_VALGRIND
 	if (threads_inited) {
 		atomic_store_lax(&terminate, 1);
-		do_wakeup();
+		do_wakeup(&wakeup_source, &wakeup_sink);
 
 		fputs("Waiting for producer thread to exit..."CR, tty);
 		fflush(tty);
@@ -3589,7 +3564,7 @@ play_file(File *f, int64_t pts)
 	/* Mutex will acquire. */
 	atomic_store_lax(&seek_file_pts, pts);
 	atomic_store_lax(&seek_file0, f);
-	do_wakeup();
+	do_wakeup(&wakeup_source, NULL);
 }
 
 static void
@@ -3868,7 +3843,7 @@ pause_player(int pause)
 {
 	atomic_store_lax(&paused, pause);
 	if (!pause)
-		do_wakeup();
+		do_wakeup(&wakeup_source, &wakeup_sink);
 }
 
 static struct timespec
@@ -3925,7 +3900,7 @@ do_cmd(char c)
 
 	case 'm': /* Metadata. */
 		atomic_store_lax(&dump_in0, 1);
-		do_wakeup();
+		do_wakeup(&wakeup_source, NULL);
 		break;
 
 	case '&':
