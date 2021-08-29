@@ -3318,7 +3318,7 @@ source_worker(void *arg)
 			if (tty)
 				fflush(tty);
 		} else if (AVERROR(EAGAIN) != rc)
-			print_averror("Could not decode frame: %s\n", rc);
+			print_averror("Could not decode frame", rc);
 	}
 
 terminate:
@@ -3466,7 +3466,7 @@ sink_worker(void *arg)
 			av_packet_unref(pkt);
 		}
 		if (unlikely(AVERROR(EAGAIN) != rc))
-			print_averror("Could not receive encoded frame: %s\n", rc);
+			print_averror("Could not receive encoded frame", rc);
 
 		if (tty)
 			fflush(tty);
