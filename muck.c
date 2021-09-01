@@ -1918,7 +1918,8 @@ get_file_index(PlaylistFile pf)
 			if (a <= &playlist->a)
 				break;
 
-			ret += 1 /* Self. */ + playlist->child_filter_count[0];
+			ret += (File *)playlist - (File *)child;
+			ret += playlist->child_filter_count[0];
 			child = (void *)((char *)playlist + get_file_size(F_PLAYLIST));
 		}
 
@@ -1950,7 +1951,7 @@ print_file(File const *f, FILE *stream, int highlight)
 
 	flockfile(stream);
 
-	fprintf(tty, "%s\e[37m%6"PRId64"\e[m ",
+	fprintf(tty, "%s\e[37m%6"PRIu64"\e[m ",
 			highlight ? "\e[1;33m>\e[m" : " ",
 			get_file_index((PlaylistFile){
 				.p = get_parent(&master, &f->a),
