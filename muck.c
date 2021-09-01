@@ -995,8 +995,8 @@ read_file(Playlist *parent, AnyFile *a)
 	if (F_PLAYLIST == playlist->a.type ||
 	    F_PLAYLIST_COMPRESSED == playlist->a.type)
 	{
-		char const *program = probe_compressor(playlist->a.url);
 		pid_t pid = -1;
+		char const *program;
 
 		if (F_PLAYLIST_COMPRESSED == playlist->a.type)
 			compress_playlist(playlist, &fd, &pid, &program, 0);
@@ -1122,8 +1122,8 @@ save_playlist(Playlist *playlist)
 		return;
 	}
 
-	char const *program;
 	pid_t pid = -1;
+	char const *program;
 
 	if (F_PLAYLIST_COMPRESSED == playlist->a.type)
 		compress_playlist(playlist, &fd, &pid, &program, 1);
