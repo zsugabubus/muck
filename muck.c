@@ -657,8 +657,13 @@ read_playlist(Playlist *playlist, int fd)
 	char const *error_msg = NULL;
 
 	File file;
+
 	char fdata[UINT16_MAX];
-	size_t fdata_size = 0;
+	size_t fdata_size;
+#define RESET_FDATA \
+	for (enum Metadata i = 0; i < M_NB; ++i) \
+		file.metadata[i] = UINT16_MAX; \
+	fdata_size = 0;
 
 	char buf[UINT16_MAX];
 	uint16_t buf_size = 0;
@@ -667,6 +672,8 @@ read_playlist(Playlist *playlist, int fd)
 
 	size_t lnum = 1;
 	char *col;
+
+	RESET_FDATA;
 
 	for (;;) {
 		col = NULL;
@@ -698,16 +705,13 @@ read_playlist(Playlist *playlist, int fd)
 
 		if (1 == lnum && !strcmp(line, "#EXTM3U")) {
 			is_m3u = 1;
-			goto reset_file;
 		} else if (is_m3u && '#' == *line) {
 #define IS_DIRECTIVE(directive) \
 	(!memcmp(line + 1, directive, strlen(directive)) && \
 	 (col = line + 1 + strlen(directive)))
 
 			if (IS_DIRECTIVE("EXTINF:")) {
-				for (enum Metadata i = 0; i < M_NB; ++i)
-					file.metadata[i] = UINT16_MAX;
-				fdata_size = 0;
+				RESET_FDATA;
 
 				file.metadata[M_duration] = 0;
 				while ('0' <= *col && *col <= '9') {
@@ -849,11 +853,7 @@ read_playlist(Playlist *playlist, int fd)
 			memcpy(a->url + url_size, fdata, fdata_size);
 
 			read_file(playlist, a);
-
-		reset_file:;
-			for (enum Metadata i = 0; i < M_NB; ++i)
-				file.metadata[i] = UINT16_MAX;
-			fdata_size = 0;
+			RESET_FDATA;
 		}
 
 		++line_end; /* Skip LF. */
@@ -874,6 +874,8 @@ out:
 		print_playlist_error(playlist, 0, "Opened read-only", 0, 0);
 
 	close(fd);
+
+#undef RESET_FDATA
 }
 
 static void
