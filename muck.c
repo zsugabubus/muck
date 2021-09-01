@@ -660,7 +660,7 @@ read_playlist(Playlist *playlist, int fd)
 	char fdata[UINT16_MAX];
 	size_t fdata_size = 0;
 
-	char buf[UINT16_MAX]; /* NOTE: In theory a line could be longer. */
+	char buf[UINT16_MAX];
 	uint16_t buf_size = 0;
 
 	int is_m3u = 0;
@@ -671,25 +671,29 @@ read_playlist(Playlist *playlist, int fd)
 	for (;;) {
 		col = NULL;
 
-		char *line_end;
+		char *line = buf, *line_end;
 		while (!(line_end = memchr(buf, '\n', buf_size))) {
-			if (sizeof buf == buf_size) {
+			if (sizeof buf - 1 == buf_size) {
 				error_msg = "Too long line";
 				goto out;
 			}
 
-			ssize_t len = read(fd, buf + buf_size, sizeof buf - buf_size);
+			ssize_t len = read(fd, buf + buf_size, (sizeof buf - 1) - buf_size);
 			if (len < 0) {
 				error_msg = "Could not read playlist stream";
 				goto out;
-			} else if (!len)
-				/* Last line must be LF terminated. */
-				goto out;
+			} else if (!len) {
+				if (!buf_size)
+					goto out;
+
+				line_end = buf + buf_size;
+				++buf_size;
+				break;
+			}
 
 			buf_size += len;
 		}
 
-		char *line = buf;
 		*line_end = '\0';
 
 		if (1 == lnum && !strcmp(line, "#EXTM3U")) {
