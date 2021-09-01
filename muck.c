@@ -1947,11 +1947,11 @@ get_parent(Playlist const *ancestor, AnyFile const *a)
 }
 
 static void
-print_file(File const *f, FILE *stream, int highlight)
+print_file(File const *f, int highlight)
 {
 	char const *str;
 
-	flockfile(stream);
+	flockfile(tty);
 
 	fprintf(tty, "%s\e[37m%6"PRIu64"\e[m ",
 			highlight ? "\e[1;33m>\e[m" : " ",
@@ -1962,35 +1962,39 @@ print_file(File const *f, FILE *stream, int highlight)
 #define M(name) (f->metadata[M_##name] && (str = f->a.url + f->metadata[M_##name]))
 
 	if (!M(album_artist) && !M(artist) && !M(title)) {
-		if (!(str = strrchr(f->a.url, '/')))
-			str = f->a.url;
-		else
-			++str;
+		if (F_FILE == f->a.type) {
+			if (!(str = strrchr(f->a.url, '/')))
+				str = f->a.url;
+			else
+				++str;
 
-		int has_space = 0;
-		size_t dots = 0;
-		size_t dashes = 0;
-		size_t lowlines = 0;
-		for (char const *s = str; *s; ++s) {
-			dots += '.' == *s;
-			dashes += '-' == *s;
-			lowlines += '_' == *s;
-			has_space |= ' ' == *s;
-		}
-		if (has_space || !(dots | dashes | lowlines)) {
-			fputs(str, stream);
+			int has_space = 0;
+			size_t dots = 0;
+			size_t dashes = 0;
+			size_t lowlines = 0;
+			for (char const *s = str; *s; ++s) {
+				dots += '.' == *s;
+				dashes += '-' == *s;
+				lowlines += '_' == *s;
+				has_space |= ' ' == *s;
+			}
+			if (has_space || !(dots | dashes | lowlines)) {
+				fputs(str, tty);
+			} else {
+				size_t n = dots;
+				char space = '.';
+
+				if (n <= dashes)
+					n = dashes, space = '-';
+
+				if (n <= lowlines)
+					n = lowlines, space = '_';
+
+				for (char const *s = str; *s; ++s)
+					fputc(space == *s ? ' ' : *s, tty);
+			}
 		} else {
-			size_t n = dots;
-			char space = '.';
-
-			if (n <= dashes)
-				n = dashes, space = '-';
-
-			if (n <= lowlines)
-				n = lowlines, space = '_';
-
-			for (char const *s = str; *s; ++s)
-				fputc(space == *s ? ' ' : *s, stream);
+			fputs(f->a.url, tty);
 		}
 	} else {
 #define PRINT_NUMBER(name) \
@@ -1998,26 +2002,26 @@ print_file(File const *f, FILE *stream, int highlight)
 		      !memcmp(str, "1", 2)) && \
 		    M(name)) \
 		{ \
-			fputc('(', stream); \
-			fputs(str, stream); \
+			fputc('(', tty); \
+			fputs(str, tty); \
 			if (M(name##_total)) { \
-				fputc('/', stream); \
-				fputs(str, stream); \
+				fputc('/', tty); \
+				fputs(str, tty); \
 			} \
-			fputs(") ", stream); \
+			fputs(") ", tty); \
 		}
 
 #define PRINT_TITLE(params, title, version) \
 		if (M(title)) { \
-			fprintf(stream, "\e["params"m%s\e[m", str); \
+			fprintf(tty, "\e["params"m%s\e[m", str); \
 			if (M(version)) \
-				fprintf(stream, " (\e["params"m%s\e[m)", str); \
+				fprintf(tty, " (\e["params"m%s\e[m)", str); \
 		} else { \
-			fputs("ID", stream); \
+			fputs("ID", tty); \
 		}
 
 		if (M(date))
-			fprintf(stream, "%-10s ", str);
+			fprintf(tty, "%-10s ", str);
 
 		/* Artist 1;Artist 2 */
 		if (M(album_artist)) {
@@ -2029,9 +2033,9 @@ print_file(File const *f, FILE *stream, int highlight)
 				if (!p)
 					p = s + strlen(s);
 				if (any)
-					fputc(';', stream);
+					fputc(';', tty);
 				any = 1;
-				fprintf(stream, "\e[m%.*s\e[m", (int)(p - s), s);
+				fprintf(tty, "\e[m%.*s\e[m", (int)(p - s), s);
 				if (*(s = p))
 					++s;
 			}
@@ -2048,9 +2052,9 @@ print_file(File const *f, FILE *stream, int highlight)
 					    ('\0' != q[sn] && ';' != q[sn]))
 					{
 						if (any)
-							fputc(';', stream);
+							fputc(';', tty);
 						any = 1;
-						fprintf(stream, "\e[m%.*s\e[m", (int)(p - s), s);
+						fprintf(tty, "\e[m%.*s\e[m", (int)(p - s), s);
 					}
 
 					if (p)
@@ -2060,26 +2064,26 @@ print_file(File const *f, FILE *stream, int highlight)
 				}
 			}
 		} else if (M(artist)) {
-			fputs(str, stream);
+			fputs(str, tty);
 		} else {
-			fputs("ID", stream); \
+			fputs("ID", tty); \
 		}
-		fputs(" - ", stream);
+		fputs(" - ", tty);
 
 		/* 01/01. [CATALOG] Album Title (Album Version) [LABEL] [BARCODE] */
 		PRINT_NUMBER(disc);
 
 		if (M(catalog))
-			fprintf(stream, "[%s] ", str);
+			fprintf(tty, "[%s] ", str);
 
 		PRINT_TITLE("", album, album_version);
 
 		if (M(label))
-			fprintf(stream, " [%s]", str);
+			fprintf(tty, " [%s]", str);
 
 		if (M(barcode))
-			fprintf(stream, " [BARCODE %s]", str);
-		fputs(" / ", stream);
+			fprintf(tty, " [BARCODE %s]", str);
+		fputs(" / ", tty);
 
 		/* 01/22. Track Title (Track Version) (ft. Artist3;Artist4) [ISRC] {Genre 1;Genre2} */
 
@@ -2088,25 +2092,25 @@ print_file(File const *f, FILE *stream, int highlight)
 		/* ;33;40 */
 
 		if (M(featured_artist))
-			fprintf(stream, " (ft. \e[m%s\e[m)", str);
+			fprintf(tty, " (ft. \e[m%s\e[m)", str);
 
 		if (M(isrc))
-			fprintf(stream, " [ISRC %s]", str);
+			fprintf(tty, " [ISRC %s]", str);
 
 		if (M(genre))
-			fprintf(stream, " {%s}", str);
+			fprintf(tty, " {%s}", str);
 	}
 
 	if (M(comment))
-		fprintf(stream, " \e[37m%s\e[m", str);
+		fprintf(tty, " \e[37m%s\e[m", str);
 
 #undef M
 
 	if (highlight)
 		fputs(" \e[1;33m<\e[m", tty);
-	fputs("\e[K\n", stream);
+	fputs("\e[K\n", tty);
 
-	funlockfile(stream);
+	funlockfile(tty);
 }
 
 static char const *
@@ -2980,7 +2984,7 @@ print_around(PlaylistFile pf)
 		lines = 4;
 	fprintf(tty, "\e[?7l" "\e[J" "\e[%dB", lines);
 	for (;;) {
-		print_file(from.f, tty, !from_offset);
+		print_file(from.f, !from_offset);
 		if (to_lim <= 0 || from.f == to_stop.f)
 			break;
 		from = seek_playlist(&master, &from, 1, SEEK_CUR);
@@ -3164,7 +3168,7 @@ source_worker(void *arg)
 					if (atomic_load_lax(&auto_i))
 						print_format();
 					print_now_playing();
-					print_file(in0.pf.f, tty, 0);
+					print_file(in0.pf.f, 0);
 					if (atomic_load_lax(&auto_w))
 						print_around(in0.pf);
 				} else {
@@ -3903,7 +3907,7 @@ do_cmd(char c)
 		/* FALLTHROUGH */
 	case 'i': /* Information. */
 		print_format();
-		print_file(atomic_load_lax(&in0.pf.f), tty, 0);
+		print_file(atomic_load_lax(&in0.pf.f), 0);
 		break;
 
 	case 'm': /* Metadata. */
