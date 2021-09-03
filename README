@@ -9,8 +9,8 @@ SYNOPSIS
        muck [OPTION]...  [URL]...
 
 DESCRIPTION
-       muck is a minimal music player built on top of FFmpeg. It is written in
-       C, so that's where it name comes from: mu-C-k player.
+       muck  is  a music player built on top of FFmpeg. It is written in C, so
+       that's where it name comes from: mu-C-k player.
 
        When URLs are given, they are used to populate master playlist.  Other‐
        wise  a special stdin playlist is created and the playlist file is read
@@ -20,10 +20,10 @@ DESCRIPTION
        Files ending in { .m3u | .m3u8 | .pl }[ .bz | .bz2 | .gz | .lz4 | .xz |
        .zst ] are treated as (compressed) playlist files.
 
-       If file starts with #EXTM3U it is recognized as an M3U playlist and for
-       every media URL metadata is written to and read from #EXTINF directive.
-       Playlists  containing  unknown comments are marked read-only thus never
-       overwritten.
+       If  file  starts  with #EXTM3U, it is recognized as an M3U playlist and
+       for every media URL metadata is written to and read from #EXTINF direc‐
+       tive.   Playlists containing unknown comments are marked read-only thus
+       never overwritten.
 
        #PLAYLIST:NAME directive can be used to provide a  pretty  name  for  a
        playlist instead of referencing to it by its path.
@@ -45,6 +45,9 @@ DESCRIPTION
        only.
 
 OPTIONS
+       -q QUERY
+              Execute initial search query.
+
        -x COMMAND
               Execute COMMAND at startup.
 
@@ -74,8 +77,7 @@ OPTIONS
 
               Default: 8192.
 
-       -w     Allow writing user.play_count and user.skip_count  extended  at‐
-              tributes.
+       -w     Allow writing user.last_play extended attributes.
 
        -d     Print debug information. Be very verbose when given twice.
 
@@ -119,7 +121,7 @@ USAGE
 
               Detailed manual is part of the search screen.
 
-       +, -   Change  volume  property of volume filter by +1% and -2% respec‐
+       +, -   Change volume property of volume filter by +1% and  -2%  respec‐
               tively.
 
        *      Toggle mute. Uses volume filter.
@@ -134,7 +136,7 @@ USAGE
        (other letter)
               Execute $MUCK_HOME/{KEY}.
 
-              $MUCK_* environment variables are set, based  on  the  currently
+              $MUCK_*  environment  variables  are set, based on the currently
               playing file.
 
 ENVIRONMENT
