@@ -364,7 +364,7 @@ static int has_number;
 static int64_t cur_number;
 
 struct termios saved_termios;
-static int win_height;
+static int win_height, win_width;
 static FILE *tty;
 static char print_clear = '\0';
 
@@ -2070,20 +2070,22 @@ print_file(File const *f, int highlight)
 		}
 		fputs(" - ", tty);
 
-		/* 01/01. [CATALOG] Album Title (Album Version) [LABEL] [BARCODE] */
-		PRINT_NUMBER(disc);
+		if (80 <= win_width) {
+			/* 01/01. [CATALOG] Album Title (Album Version) [LABEL] [BARCODE] */
+			PRINT_NUMBER(disc);
 
-		if (M(catalog))
-			fprintf(tty, "[%s] ", str);
+			if (M(catalog))
+				fprintf(tty, "[%s] ", str);
 
-		PRINT_TITLE("", album, album_version);
+			PRINT_TITLE("", album, album_version);
 
-		if (M(label))
-			fprintf(tty, " [%s]", str);
+			if (M(label))
+				fprintf(tty, " [%s]", str);
 
-		if (M(barcode))
-			fprintf(tty, " [BARCODE %s]", str);
-		fputs(" / ", tty);
+			if (M(barcode))
+				fprintf(tty, " [BARCODE %s]", str);
+			fputs(" / ", tty);
+		}
 
 		/* 01/22. Track Title (Track Version) (ft. Artist3;Artist4) [ISRC] {Genre 1;Genre2} */
 
@@ -3588,7 +3590,10 @@ handle_sigwinch(int sig)
 	(void)sig;
 
 	struct winsize w;
-	win_height = !ioctl(fileno(tty), TIOCGWINSZ, &w) ? w.ws_row : 0;
+	if (!ioctl(fileno(tty), TIOCGWINSZ, &w)) {
+		win_height = w.ws_row;
+		win_width = w.ws_col;
+	}
 }
 
 static void
