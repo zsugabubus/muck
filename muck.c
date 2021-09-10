@@ -2798,7 +2798,7 @@ append:;
 	if (total)
 		fprintf(tty, "\e[1;32m%"PRIu64, total);
 	else
-		fputs("No", tty);
+		fputs("\e[1;31mNo", tty);
 	fputs(" files matched\e[m\n", tty);
 
 cleanup:
