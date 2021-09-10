@@ -34,6 +34,7 @@ ffmpeg_dep = declare_dependency(
     dependency('libva-x11'),
     dependency('libxml-2.0'),
     dependency('openssl'),
+    dependency('opus'),
     dependency('threads'),
     dependency('vdpau'),
     dependency('x11'),
