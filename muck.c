@@ -3230,7 +3230,8 @@ source_worker(void *arg)
 
 		if (unlikely(S_STALLED <= state) ||
 		    unlikely(atomic_load_lax(&paused)) ||
-		    buffer_bytes_max <= atomic_load_explicit(&buffer_bytes, memory_order_acquire) ||
+		    (0 < buffer_low ? buffer_low : buffer_bytes_max) <=
+			atomic_load_explicit(&buffer_bytes, memory_order_acquire) ||
 		    (unlikely(buffer_tail + 1 == atomic_load_lax(&buffer_head)) &&
 		     (buffer_full_bytes = atomic_load_lax(&buffer_bytes), 1)))
 		{
