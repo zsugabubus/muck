@@ -4183,9 +4183,7 @@ main(int argc, char **argv)
 		sa.sa_flags = SA_RESTART;
 		/* Block all signals. */
 		xassert(!sigfillset(&sa.sa_mask));
-#if 0
-		pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL);
-#endif
+		xassert(!pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL));
 
 		sa.sa_handler = handle_sigcont;
 		xassert(!sigaction(SIGCONT, &sa, NULL));
