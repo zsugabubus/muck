@@ -3030,18 +3030,17 @@ seek_buffer(int64_t target_pts)
 static void
 update_title(File const *f)
 {
-	if (!f)
-		return;
-
 	flockfile(tty);
 	fputs("\e]0;", tty);
-	if (f->metadata[M_title]) {
+	if (f && f->metadata[M_title]) {
 		/* Note that metadata is free from control characters. */
 		fputs(f->a.url + f->metadata[M_title], tty);
 		if (f->metadata[M_version])
 			fprintf(tty, " (%s)", f->a.url + f->metadata[M_version]);
-	} else {
+	} else if (f) {
 		fputs(f->a.url, tty);
+	} else {
+		fputs("muck", tty);
 	}
 	fputc('\a', tty);
 	funlockfile(tty);
