@@ -379,9 +379,6 @@ get_playlist_name(Playlist const *playlist)
 static void
 print_error(char const *msg, ...)
 {
-	if (!tty)
-		return;
-
 	va_list ap;
 	va_start(ap, msg);
 	flockfile(tty);
@@ -2820,9 +2817,6 @@ cleanup:
 static void
 print_progress(int force)
 {
-	if (!tty)
-		return;
-
 	static int64_t _Atomic old_clock = 0, old_duration = 0;
 
 	int64_t clock = atomic_load_lax(&cur_pts);
@@ -2833,10 +2827,13 @@ print_progress(int force)
 	    clock == atomic_load_lax(&old_clock) &&
 	    duration == atomic_load_lax(&old_duration))
 		return;
+
+	if (ftrylockfile(tty))
+		return;
+
 	atomic_store_lax(&old_clock, clock);
 	atomic_store_lax(&old_duration, duration);
 
-	flockfile(tty);
 	fprintf(tty, "%"PRId64"%c%c%c ",
 			cur_number,
 			has_number ? '?' : '\0',
@@ -3109,6 +3106,15 @@ out:
 	xassert(!pthread_mutex_unlock(&file_lock));
 }
 
+static void
+ftryflush(FILE *stream)
+{
+	if (!ftrylockfile(stream)) {
+		fflush(stream);
+		funlockfile(stream);
+	}
+}
+
 static void *
 source_worker(void *arg)
 {
@@ -3175,14 +3181,12 @@ source_worker(void *arg)
 						print_around(in0.pf);
 				} else {
 					xassert(!pthread_mutex_unlock(&file_lock));
-					if (tty)
-						fflush(tty);
+					ftryflush(tty);
 					/* Do not flush buffer yet. */
 					goto seek;
 				}
 
-				if (tty)
-					fflush(tty);
+				ftryflush(tty);
 
 				seek_buffer(INT64_MIN);
 				atomic_store_lax(&seek_pts, seek_file_pts);
@@ -3287,7 +3291,7 @@ source_worker(void *arg)
 			continue;
 		}
 
-		if (unlikely((AVSTREAM_EVENT_FLAG_METADATA_UPDATED & in->s.format_ctx->event_flags)) && tty) {
+		if (unlikely((AVSTREAM_EVENT_FLAG_METADATA_UPDATED & in->s.format_ctx->event_flags))) {
 			in->s.format_ctx->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
 
 			AVDictionaryEntry const *t = av_dict_get(in->s.format_ctx->metadata, "StreamTitle", NULL, 0);
@@ -3330,10 +3334,10 @@ source_worker(void *arg)
 			}
 
 			print_progress(0);
-			if (tty)
-				fflush(tty);
 		} else if (AVERROR(EAGAIN) != rc)
 			print_averror("Could not decode frame", rc);
+
+		ftryflush(tty);
 	}
 
 terminate:
@@ -3446,8 +3450,7 @@ sink_worker(void *arg)
 		atomic_store_lax(&cur_pts, frame->pts);
 
 		print_progress(0);
-		if (tty)
-			fflush(tty);
+		ftryflush(tty);
 
 		frame->pts = out_dts;
 		frame->pkt_dts = out_dts;
@@ -3483,8 +3486,7 @@ sink_worker(void *arg)
 		if (unlikely(AVERROR(EAGAIN) != rc))
 			print_averror("Could not receive encoded frame", rc);
 
-		if (tty)
-			fflush(tty);
+		ftryflush(tty);
 	}
 
 terminate:
@@ -3585,9 +3587,6 @@ play_file(File *f, int64_t pts)
 static void
 handle_sigwinch(int sig)
 {
-	if (!tty)
-		return;
-
 	(void)sig;
 
 	struct winsize w;
@@ -3614,12 +3613,14 @@ handle_sigexit(int sig)
 static int
 spawn(void)
 {
+	flockfile(tty);
 	fputs("\e[J", tty);
 	fflush(tty);
 
 	pid_t pid;
 	if (!(pid = fork())) {
 		restore_tty();
+		funlockfile(tty);
 
 		struct sigaction sa;
 		sigemptyset(&sa.sa_mask);
@@ -3636,9 +3637,6 @@ spawn(void)
 		return 0;
 	}
 
-	FILE *saved_tty = tty;
-	tty = NULL;
-
 	int rc;
 	for (;;) {
 		int status;
@@ -3651,8 +3649,8 @@ spawn(void)
 		break;
 	}
 
-	tty = saved_tty;
 	setup_tty();
+	funlockfile(tty);
 
 	return rc;
 }
@@ -4146,7 +4144,7 @@ log_cb(void *ctx, int level, const char *format, va_list ap)
 {
 	(void)ctx;
 
-	if (av_log_get_level() < level || !tty)
+	if (av_log_get_level() < level)
 		return;
 
 	flockfile(tty);
