@@ -3626,13 +3626,14 @@ spawn(void)
 
 		sa.sa_handler = SIG_DFL;
 
-		sigaction(SIGCONT, &sa, NULL);
-		sigaction(SIGINT, &sa, NULL);
-		sigaction(SIGTERM, &sa, NULL);
-		sigaction(SIGQUIT, &sa, NULL);
-		sigaction(SIGPIPE, &sa, NULL);
+		xassert(!sigaction(SIGCONT, &sa, NULL));
+		xassert(!sigaction(SIGWINCH, &sa, NULL));
+		xassert(!sigaction(SIGINT, &sa, NULL));
+		xassert(!sigaction(SIGTERM, &sa, NULL));
+		xassert(!sigaction(SIGQUIT, &sa, NULL));
+		xassert(!sigaction(SIGPIPE, &sa, NULL));
 
-		pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL);
+		xassert(!pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL));
 		return 0;
 	}
 
