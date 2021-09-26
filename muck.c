@@ -4078,6 +4078,14 @@ do_cmd(char c)
 		/* TODO: Just like "a" but for all filtered files. */
 		break;
 
+	case '?':
+		if (!spawn()) {
+			execlp("man", "man", "muck.1", NULL);
+			print_strerror("Could not open manual page");
+			_exit(127);
+		}
+		break;
+
 	default:
 	{
 		if (!(' ' <= (unsigned)c && (unsigned)c <= '~'))
