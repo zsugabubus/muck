@@ -4309,10 +4309,17 @@ main(int argc, char **argv)
 		master.mnemonic = '.';
 
 		if (argc <= optind) {
-			Playlist *playlist = append_file(&master, F_PLAYLIST);
-			init_file(&playlist->a, "stdin");
-			read_file(&master, &playlist->a);
-			read_playlist(playlist, STDIN_FILENO);
+			Playlist *playlist;
+			if (!isatty(STDIN_FILENO)) {
+				playlist = append_file(&master, F_PLAYLIST);
+				init_file(&playlist->a, "stdin");
+				playlist->dirfd = -1;
+				read_playlist(playlist, dup(STDIN_FILENO));
+			} else {
+				playlist = append_file(&master, F_PLAYLIST_DIRECTORY);
+				init_file(&playlist->a, ".");
+				read_file(&master, &playlist->a);
+			}
 		} else for (; optind < argc; ++optind) {
 			char const *url = argv[optind];
 			enum FileType type = probe_url(&master, url);

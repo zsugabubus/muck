@@ -17,9 +17,16 @@ When
 .IR URL s
 are given, they are used to populate
 .B master
-playlist. Otherwise a special
+playlist.
+.PP
+When no URLs are given and standard input does not refer to a terminal, a
+special
 .B stdin
-playlist is created and the playlist file is read from the standard input.
+playlist is created and playlist file is read from the standard input.
+.PP
+Otherwise a
+.B \.
+playlist is created and files are read from the current directory.
 .
 .SS Playlists
 .PP
@@ -36,8 +43,8 @@ Playlists containing unknown comments are marked read-only thus never
 overwritten.
 .PP
 .BI #PLAYLIST: NAME
-directive can be used to provide a pretty name for a playlist instead of
-referencing to it by its path.
+directive can be used to provide a pretty name for a playlist (instead of
+referencing to it by its path).
 .PP
 Playlists are opened only once, immediately after startup and may be nested
 without limits.
@@ -51,8 +58,7 @@ this limitation, use
 .SS "Cover art"
 When
 .RB $ MUCK_HOME/cover
-exists, the cover art of currently playing file is written
-to it.
+exists, cover art of currently playing file is written to it.
 .PP
 Note that it can be a symbolic link (e.g. \[->] /tmp/cover), just be aware that
 some image viewers can detect file time changes on their real path only.
