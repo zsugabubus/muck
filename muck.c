@@ -2776,7 +2776,7 @@ append:;
 	}
 
 	if (!has_playlist_clause) {
-		s = "p=^[^.]";
+		s = "p=^[^-]";
 		goto append;
 	}
 
