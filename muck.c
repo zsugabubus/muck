@@ -3894,11 +3894,11 @@ do_cmd(char c)
 		break;
 
 	case '+':
-		atomic_store_lax(&volume, FFMIN(volume + 1, 100));
+		atomic_store_lax(&volume, FFMIN(abs(volume) + 1, 100));
 		break;
 
 	case '-':
-		atomic_store_lax(&volume, FFMAX(volume - 2, 0));
+		atomic_store_lax(&volume, FFMAX(abs(volume) - 2, 0));
 		break;
 
 	case 'S': /* Statistics. */
