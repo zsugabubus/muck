@@ -4323,6 +4323,7 @@ main(int argc, char **argv)
 			if (!isatty(STDIN_FILENO)) {
 				playlist = append_file(&master, F_PLAYLIST);
 				init_file(&playlist->a, "stdin");
+				playlist->read_only = 1;
 				playlist->dirfd = AT_FDCWD;
 				read_playlist(playlist, dup(STDIN_FILENO));
 			} else {
