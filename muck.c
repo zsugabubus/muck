@@ -3629,6 +3629,8 @@ spawn(void)
 		restore_tty();
 		funlockfile(tty);
 
+		xassert(!dup2(fileno(tty), STDIN_FILENO));
+
 		struct sigaction sa;
 		sigemptyset(&sa.sa_mask);
 
