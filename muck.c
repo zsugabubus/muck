@@ -4321,7 +4321,7 @@ main(int argc, char **argv)
 			if (!isatty(STDIN_FILENO)) {
 				playlist = append_file(&master, F_PLAYLIST);
 				init_file(&playlist->a, "stdin");
-				playlist->dirfd = -1;
+				playlist->dirfd = AT_FDCWD;
 				read_playlist(playlist, dup(STDIN_FILENO));
 			} else {
 				playlist = append_file(&master, F_PLAYLIST_DIRECTORY);
