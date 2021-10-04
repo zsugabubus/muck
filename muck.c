@@ -1178,6 +1178,7 @@ close_output(void)
 	if (out.format_ctx) {
 		avio_closep(&out.format_ctx->pb);
 		avformat_free_context(out.format_ctx);
+		out.format_ctx = NULL;
 	}
 }
 
@@ -1805,7 +1806,7 @@ configure_output(AVFrame const *frame)
 		: avcodec_find_encoder_by_name(ocodec);
 	if (!codec) {
 		print_error("Could not find encoder");
-		return -1;
+		goto fail;
 	}
 
 	/* Configuration not changed. */
@@ -1824,14 +1825,14 @@ configure_output(AVFrame const *frame)
 	rc = avformat_alloc_output_context2(&out.format_ctx, NULL, oformat_name, ofilename);
 	if (rc < 0) {
 		print_averror("Could not allocate output", rc);
-		return -1;
+		goto fail;
 	}
 
 	if (!(AVFMT_NOFILE & out.format_ctx->oformat->flags)) {
 		rc = avio_open(&out.format_ctx->pb, ofilename, AVIO_FLAG_WRITE);
 		if (rc < 0) {
 			print_averror("Could not open output filename", rc);
-			return -1;
+			goto fail;
 		}
 	}
 
@@ -1839,12 +1840,12 @@ configure_output(AVFrame const *frame)
 	/* Create a new audio stream in the output file container. */
 	if (!(stream = avformat_new_stream(out.format_ctx, NULL))) {
 		print_averror("Could not allocate output stream", rc);
-		return -1;
+		goto fail;
 	}
 
 	if (!(out.codec_ctx = avcodec_alloc_context3(codec))) {
 		print_averror("Could not allocate encoder", rc);
-		return -1;
+		goto fail;
 	}
 
 	if (out.format_ctx->flags & AVFMT_GLOBALHEADER)
@@ -1865,13 +1866,13 @@ configure_output(AVFrame const *frame)
 	    (rc = avcodec_parameters_from_context(stream->codecpar, out.codec_ctx)) < 0)
 	{
 		print_averror("Could not open encoder", rc);
-		return -1;
+		goto fail;
 	}
 
 	rc = avformat_write_header(out.format_ctx, NULL);
 	if (rc < 0) {
 		print_averror("Could not open output", rc);
-		return -1;
+		goto fail;
 	}
 
 	out.audio = out.format_ctx->streams[0];
@@ -1879,6 +1880,10 @@ configure_output(AVFrame const *frame)
 	update_output_info();
 
 	return 1;
+
+fail:
+	close_output();
+	return -1;
 }
 
 static char const *
@@ -3426,6 +3431,9 @@ sink_worker(void *arg)
 			rc = configure_graph(pars);
 		if (unlikely(rc < 0)) {
 			atomic_store_lax(&paused, 1);
+
+			print_progress(1);
+			ftryflush(tty);
 			continue;
 		}
 
