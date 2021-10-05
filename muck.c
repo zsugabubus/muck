@@ -1487,14 +1487,16 @@ update_cover(Input const *in)
 		return;
 
 	uint8_t const *data;
-	int data_size;
+	int data_size = 0;
 
 	AVStream const *stream = in->cover_front;
 	if (stream) {
 		AVPacket const *pic = &stream->attached_pic;
 		data = pic->data;
 		data_size = pic->size;
-	} else {
+	}
+
+	if (data_size <= 0) {
 		static uint8_t const DEFAULT_COVER[] =
 		{
 #include "cover.png.h"
