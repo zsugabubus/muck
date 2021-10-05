@@ -46,6 +46,10 @@
 # define unlikely(x) x
 #endif
 
+#if !HAVE_PTHREAD_SETNAME_NP
+# define pthread_setname_np(...) (void)0
+#endif
+
 #define ARRAY_SIZE(x) (sizeof x / sizeof *x)
 
 #define PTR_INC(pp, n) (pp) = (void *)((char *)(pp) + (n))
@@ -3126,9 +3130,7 @@ source_worker(void *arg)
 {
 	(void)arg;
 
-#if HAVE_PTHREAD_SETNAME_NP
-	pthread_setname_np(pthread_self(), "source");
-#endif
+	pthread_setname_np(pthread_self(), "muck/source");
 
 	AVPacket *pkt = av_packet_alloc();
 	if (!pkt) {
@@ -3366,9 +3368,7 @@ sink_worker(void *arg)
 {
 	(void)arg;
 
-#if HAVE_PTHREAD_SETNAME_NP
-	pthread_setname_np(pthread_self(), "sink");
-#endif
+	pthread_setname_np(pthread_self(), "muck/sink");
 
 	AVFrame *frame = NULL;
 	int64_t out_dts = 0;
@@ -4352,6 +4352,8 @@ main(int argc, char **argv)
 
 	/* TUI event loop. */
 	{
+		pthread_setname_np(pthread_self(), "muck/tty");
+
 		struct pollfd fds[2];
 		/* Either read user input... */
 		fds[0].fd = fileno(tty);
