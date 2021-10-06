@@ -289,7 +289,6 @@ static int wakeup_source, wakeup_sink;
 static int threads_inited;
 static atomic_uchar ALIGNED_ATOMIC terminate;
 #endif
-static int control[2];
 
 static char const *ocodec = "pcm";
 static char const *oformat_name = "alsa";
@@ -2491,15 +2490,16 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 
 	int dir = 1;
 	if (POS_RND == pos) {
-		/* Tweak random a bit by making sure that we do not play twice the same file. */
+		/* Tweak randomness a bit to make sure we do not play twice the
+		 * same file one after another. */
 		if (max <= 1)
 			pos = 0;
 		else
 			pos = rndn(&rnd, max - 1) + 1;
 		whence = SEEK_CUR;
-	} else if (0 <= pos)
+	} else if (0 <= pos) {
 		pos %= max;
-	else {
+	} else {
 		pos = -pos % max;
 		dir = -1;
 	}
@@ -2849,7 +2849,7 @@ print_progress(int force)
 			cur_number,
 			has_number ? '?' : '\0',
 			seek_cmd,
-			atomic_load_lax(&paused) ? '.' : '>');
+			live ? (atomic_load_lax(&paused) ? '.' : '>') : '&');
 
 	fprintf(tty, "%3"PRId64":%02u / %3"PRId64":%02u (%3u%%)",
 			clock / 60, (unsigned)(clock % 60),
@@ -3041,7 +3041,8 @@ seek_buffer(int64_t target_pts)
 static void
 update_title(File const *f)
 {
-	flockfile(tty);
+	if (ftrylockfile(tty))
+		return;
 	fputs("\e]0;", tty);
 	if (f && f->metadata[M_title]) {
 		/* Note that metadata is free from control characters. */
@@ -3086,8 +3087,8 @@ record_play(Input const *in, int64_t cur_play_duration)
 
 	int64_t percent = cur_play_duration * 100 / cur_duration;
 
-	fprintf(tty, "Listened for %"PRId64" sec (%3"PRId64"%%)"LF,
-			cur_play_duration, percent);
+	/* fprintf(tty, "Listened for %"PRId64" sec (%3"PRId64"%%)"LF,
+			cur_play_duration, percent); */
 
 	if (50 <= percent)
 		atomic_store_lax(&play_count, play_count + 1);
@@ -3124,6 +3125,8 @@ ftryflush(FILE *stream)
 		funlockfile(stream);
 	}
 }
+
+static void do_cmd(char c, int human);
 
 static void *
 source_worker(void *arg)
@@ -3181,12 +3184,15 @@ source_worker(void *arg)
 				if (in0.s.codec_ctx) {
 					state = S_RUNNING;
 
-					if (atomic_load_lax(&auto_i))
-						print_format();
-					print_now_playing();
-					print_file(in0.pf.f, 0);
-					if (atomic_load_lax(&auto_w))
-						print_around(in0.pf);
+					if (!ftrylockfile(tty)) {
+						if (atomic_load_lax(&auto_i))
+							print_format();
+						print_now_playing();
+						print_file(in0.pf.f, 0);
+						if (atomic_load_lax(&auto_w))
+							print_around(in0.pf);
+						funlockfile(tty);
+					}
 				} else {
 					xassert(!pthread_mutex_unlock(&file_lock));
 					ftryflush(tty);
@@ -3253,7 +3259,10 @@ source_worker(void *arg)
 			seek:;
 				state = S_STALLED;
 				/* TODO: Seek commands should fill in1 first. */
-				write(control[1], (char const[]){ CONTROL('J') }, 1);
+
+				xassert(!pthread_mutex_lock(&file_lock));
+				do_cmd(CONTROL('J'), 0);
+				xassert(!pthread_mutex_unlock(&file_lock));
 			}
 
 			atomic_store_lax(&buffer_low, S_RUNNING == state
@@ -3848,14 +3857,13 @@ open_visual_search(void)
 	unlink(tmpname);
 }
 
-static int64_t
+static void
 use_number(int64_t *pnumber)
 {
 	if (has_number)
 		*pnumber = cur_number;
 	else
 		cur_number = *pnumber;
-	return *pnumber;
 }
 
 static unsigned char
@@ -3884,7 +3892,7 @@ get_file_mtim(PlaylistFile pf)
 }
 
 static void
-do_cmd(char c)
+do_cmd(char c, int human)
 {
 	if ('0' <= c && c <= '9') {
 		cur_number = 10 * (has_number ? cur_number : 0) + (c - '0');
@@ -3892,10 +3900,11 @@ do_cmd(char c)
 		return;
 	}
 
+	int can_seek = human ? live : 1;
+
 	if (CONTROL('J') == c)
 		c = seek_cmd;
 
-	PlaylistFile pf;
 	switch (c) {
 	case CONTROL('['):
 		/* Noop. */
@@ -3951,9 +3960,9 @@ do_cmd(char c)
 		open_visual_search();
 		if (live) {
 			PlaylistFile cur = get_current_pf();
-			pf = seek_playlist(&master, &cur, 0, SEEK_CUR);
+			PlaylistFile pf = seek_playlist(&master, &cur, 0, SEEK_CUR);
 			if (pf.f != cur.f)
-				goto play_file;
+				play_file(pf.f, AV_NOPTS_VALUE);
 		}
 		break;
 
@@ -3973,9 +3982,7 @@ do_cmd(char c)
 		/* TODO: Edit currently playing playlist. Can be used
 		 * to manually deselect files. Never touches real
 		 * playlist. */
-		xassert(!pthread_mutex_lock(&file_lock));
 		plumb_file(&master.a, cur_filter[live], stream);
-		xassert(!pthread_mutex_unlock(&file_lock));
 		fclose(stream);
 
 		if (!spawn()) {
@@ -3991,20 +3998,33 @@ do_cmd(char c)
 	case 'r': /* Random. */
 	{
 		seek_cmd = c;
-		pf = seek_playlist(&master, NULL, POS_RND, SEEK_SET);
-		goto play_file;
+
+		if (!can_seek)
+			break;
+
+		PlaylistFile pf = seek_playlist(&master, NULL, POS_RND, SEEK_SET);
+		play_file(pf.f, AV_NOPTS_VALUE);
 	}
+		break;
 
 	case 's': /* Set. */
 	{
 		static int64_t s_number = 0;
 
-		pf = seek_playlist(&master, NULL, use_number(&s_number), SEEK_SET);
-		/* Stay close to file, even if it fails to play. */
-		if ('p' != seek_cmd && 'n' != seek_cmd)
-			seek_cmd = 'n';
-		goto play_file;
+		use_number(&s_number);
+		if (can_seek) {
+			/* Stay close to file, even if it fails to play. */
+			if ('p' != seek_cmd && 'n' != seek_cmd)
+				seek_cmd = 'n';
+		} else {
+			seek_cmd = c;
+			break;
+		}
+
+		PlaylistFile pf = seek_playlist(&master, NULL, s_number, SEEK_SET);
+		play_file(pf.f, AV_NOPTS_VALUE);
 	}
+		break;
 
 	case 'n': /* Next. */
 	case 'N':
@@ -4014,8 +4034,11 @@ do_cmd(char c)
 
 		use_number(&n_number);
 		seek_cmd = c;
-		pf = seek_playlist(&master, NULL, 'n' == c ? n_number : -n_number, SEEK_CUR);
-	play_file:;
+
+		if (!can_seek)
+			break;
+
+		PlaylistFile pf = seek_playlist(&master, NULL, 'n' == c ? n_number : -n_number, SEEK_CUR);
 		play_file(pf.f, AV_NOPTS_VALUE);
 	}
 		break;
@@ -4024,8 +4047,12 @@ do_cmd(char c)
 	{
 		static int64_t g_number = 0;
 
-		seek_cmd = c;
 		use_number(&g_number);
+		seek_cmd = c;
+
+		if (!can_seek)
+			break;
+
 		seek_player(g_number / 100 * 60 /* min */ + g_number % 100 /* sec */, SEEK_SET);
 	}
 		break;
@@ -4034,17 +4061,25 @@ do_cmd(char c)
 	{
 		static int64_t G_number = 100 * 3 / 8;
 
-		seek_player(atomic_load_lax(&cur_duration) * use_number(&G_number) / 100, SEEK_SET);
+		use_number(&G_number);
+
+		seek_player(atomic_load_lax(&cur_duration) * G_number / 100, SEEK_SET);
 	}
 		break;
 
 	case 'h':
 	case 'l':
+		if (!can_seek)
+			break;
+
 		seek_player(('h' == c ? -1 : 1) * 5, SEEK_CUR);
 		break;
 
 	case 'j':
 	case 'k':
+		if (!can_seek)
+			break;
+
 		seek_player(('j' == c ? -1 : 1) * FFMAX(atomic_load_lax(&cur_duration) / 16, +5), SEEK_CUR);
 		break;
 
@@ -4060,11 +4095,17 @@ do_cmd(char c)
 
 	case '.':
 	case '>':
+		if (!can_seek)
+			break;
+
 		pause_player('.' == c);
 		break;
 
 	case 'c': /* Continue. */
 	case ' ':
+		if (!can_seek)
+			break;
+
 		pause_player(!paused);
 		break;
 
@@ -4103,7 +4144,7 @@ do_cmd(char c)
 		if (!(' ' <= (unsigned)c && (unsigned)c <= '~'))
 			break;
 
-		pf = get_current_pf();
+		PlaylistFile pf = get_current_pf();
 		struct timespec mtim_before = get_file_mtim(pf);
 
 		if (!spawn()) {
@@ -4153,10 +4194,10 @@ do_cmd(char c)
 }
 
 static void
-do_cmd_str(char const *s)
+do_cmd_str(char const *s, int human)
 {
 	while (*s)
-		do_cmd(*s++);
+		do_cmd(*s++, human);
 }
 
 static void
@@ -4235,10 +4276,6 @@ main(int argc, char **argv)
 	}
 
 	xassert(0 <= rnd_init(&rnd));
-
-	/* Setup internal communication channel. */
-	if (pipe2(control, O_CLOEXEC) < 0)
-		print_strerror("Could not open control channel");
 
 	/* Set defaults. */
 	update_input_info();
@@ -4346,7 +4383,7 @@ main(int argc, char **argv)
 		search_file(search_history[0]);
 
 	if (startup_cmd)
-		do_cmd_str(startup_cmd);
+		do_cmd_str(startup_cmd, 0);
 	else
 		play_file(seek_playlist(&master, NULL, 0, SEEK_SET).f, AV_NOPTS_VALUE);
 
@@ -4354,14 +4391,9 @@ main(int argc, char **argv)
 	{
 		pthread_setname_np(pthread_self(), "muck/tty");
 
-		struct pollfd fds[2];
-		/* Either read user input... */
+		struct pollfd fds[1];
 		fds[0].fd = fileno(tty);
 		fds[0].events = POLLIN;
-
-		/* ...or the internal channel, used to auto play next track. */
-		fds[1].fd = control[0];
-		fds[1].events = POLLIN;
 
 		sigset_t sigmask;
 		xassert(!sigemptyset(&sigmask));
@@ -4378,7 +4410,7 @@ main(int argc, char **argv)
 			if (1 != read(fds[!(POLLIN & fds[0].revents)].fd, &c, 1))
 				break;
 
-			do_cmd(c);
+			do_cmd(c, 1);
 		}
 	}
 }
