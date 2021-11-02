@@ -74,7 +74,7 @@ OPTIONS
 
        -m     Maximum demuxer buffer size in kB.
 
-              Default: 8192.
+              Default: 4096.
 
        -w     Allow writing user.last_play extended attributes.
 
