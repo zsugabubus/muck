@@ -2590,7 +2590,6 @@ search_file(char const *s)
 	int has_playlist_clause = 0;
 
 append:;
-	uint8_t unkeyed = 0;
 	int or = 0;
 	while (*s) {
 		switch (*s) {
@@ -2649,30 +2648,9 @@ append:;
 
 			has_playlist_clause |= MX_playlist == m;
 		}
-		if (!clause->mxs) {
-#define B(m) (UINT64_C(1) << M_##m)
-			switch (unkeyed) {
-			case 0:
-				clause->mxs =
-					B(album) |
-					B(album_version) |
-					B(title) |
-					B(version);
-				++unkeyed;
-				break;
 
-			case 1:
-				clause->mxs =
-					B(album_artist) |
-					B(album_featured_artist) |
-					B(artist) |
-					B(featured_artist) |
-					B(remixer);
-				break;
-			}
-#undef B
-		}
-
+		if (!clause->mxs)
+			clause->mxs = (UINT64_C(1) << MX_NB) - 1;
 
 		s += (clause->lt  = '<' == *s);
 		s += (clause->gt  = '>' == *s);
@@ -3769,7 +3747,7 @@ open_visual_search(void)
 			"#\n"
 			"# If a VALUE is omitted it is taken from the currently playing track.\n"
 			"#\n"
-			"# If a KEY is omitted it defaults to TITLE, CONTRIBUTOR... .\n"
+			"# If a KEY is omitted it defaults to all possible keys.\n"
 			"# When multiple KEYs are present they are ORed.\n"
 			"#\n"
 			"# <, > Perform pairwise integer comparsion. Ignore every non-digit.\n"
