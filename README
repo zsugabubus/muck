@@ -11,37 +11,38 @@ SYNOPSIS
 DESCRIPTION
        muck is a terminal music player built on top of FFmpeg.
 
-       When  URLs are given, they are used to populate master playlist. Other‐
-       wise a special stdin playlist is created and the playlist file is  read
-       from the standard input.
+       When URLs are given, they are used to populate master playlist.
+
+       When no URLs are given and standard input does not refer to a terminal,
+       a special stdin playlist is created and playlist file is read from  the
+       standard input.
+
+       Otherwise  a .  playlist is created and files are read from the current
+       directory.
 
    Playlists
        Files ending in { .m3u | .m3u8 | .pl }[ .bz | .bz2 | .gz | .lz4 | .xz |
        .zst ] are treated as (compressed) playlist files.
 
-       If file starts with #EXTM3U, it is recognized as an  M3U  playlist  and
+       If  file  starts  with #EXTM3U, it is recognized as an M3U playlist and
        for every media URL metadata is written to and read from #EXTINF direc‐
-       tive.  Playlists containing unknown comments are marked read-only  thus
+       tive.   Playlists containing unknown comments are marked read-only thus
        never overwritten.
 
-       #PLAYLIST:NAME  directive  can  be  used to provide a pretty name for a
-       playlist instead of referencing to it by its path.
+       #PLAYLIST:NAME directive can be used to provide a  pretty  name  for  a
+       playlist (instead of referencing to it by its path).
 
-       Playlists are opened only once, immediately after startup  and  may  be
+       Playlists  are  opened  only once, immediately after startup and may be
        nested without limits.
 
-       Directories  are  treated  like  a virtual playlist with the limitation
-       that they are recognized on the command-line only, i.e. they  are  nei‐
-       ther  scanned  recursively  nor  can  be played from a playlist. If you
+       Directories are treated like a virtual  playlist  with  the  limitation
+       that  they  are recognized on the command-line only, i.e. they are nei‐
+       ther scanned recursively nor can be played  from  a  playlist.  If  you
        would like to overcome this limitation, use find | muck.
 
    Cover art
-       When $MUCK_HOME/cover exists, the cover art of currently  playing  file
-       is written to it.
-
-       Note  that it can be a symbolic link (e.g. → /tmp/cover), just be aware
-       that some image viewers can detect file time changes on their real path
-       only.
+       Cover  art  is written to $MUCK_COVER.  If not set, a suitable location
+       is chosen.
 
 OPTIONS
        -q QUERY
@@ -62,7 +63,7 @@ OPTIONS
 
               Default: pcm (fake codec that uses sample format of input).
 
-       -o FORMAT
+       -f FORMAT
               Output format.
 
               Default: alsa.
@@ -72,7 +73,8 @@ OPTIONS
 
               Default: (none).
 
-       -m     Maximum demuxer buffer size in kB.
+       -m SIZE
+              Maximum demuxer buffer size in kB.
 
               Default: 4096.
 
@@ -120,7 +122,7 @@ USAGE
 
               Detailed manual is part of the search screen.
 
-       +, -   Change  volume  property of volume filter by +1% and -2% respec‐
+       +, -   Change volume property of volume filter by +1% and  -2%  respec‐
               tively.
 
        *      Toggle mute. Uses volume filter.
@@ -135,18 +137,16 @@ USAGE
        (other letter)
               Execute $MUCK_HOME/{KEY}.
 
-              $MUCK_* environment variables are set, based  on  the  currently
+              $MUCK_*  environment  variables  are set, based on the currently
               playing file.
 
 ENVIRONMENT
        EDITOR Editor to use for text-editing operations.
 
        MUCK_HOME
-              Configuration root directory.
+              Configuration home.
 
-              Always set for executed programs.
-
-              Default: $HOME/.config/muck.
+              Always set for children.
 
 EXAMPLE
        •      Read files from arguments:
