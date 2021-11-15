@@ -3833,7 +3833,8 @@ static unsigned char
 toggle(atomic_uchar *obj, char const *msg)
 {
 	unsigned char yes = !atomic_fetch_xor_explicit(obj, 1, memory_order_relaxed);
-	fprintf(tty, "%s: \e[%s\e[m"LF, msg, yes ? "1;32mYes" : "31mNo");
+	if (msg)
+		fprintf(tty, "%s: \e[%s\e[m"LF, msg, yes ? "1;32mYes" : "31mNo");
 	return yes;
 }
 
@@ -3905,7 +3906,7 @@ do_cmd(char c, int human)
 
 	case '&':
 	case '!':
-		toggle(&live, "Live");
+		toggle(&live, NULL);
 		break;
 
 	case 't': /* Tracks. */
