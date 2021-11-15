@@ -373,6 +373,7 @@ static char print_clear = '\0';
 
 static int writable;
 
+static char config_home[PATH_MAX];
 static char cover_path[PATH_MAX];
 
 static char const *
@@ -1112,17 +1113,15 @@ save_playlist(Playlist *playlist)
 	fprintf(tty, "Saving %s..."CR, playlist->a.url);
 	fflush(tty);
 
-	char tmp_pathname[PATH_MAX];
+	char tmp[PATH_MAX];
 
-	int n = snprintf(tmp_pathname, sizeof tmp_pathname,
+	int n = snprintf(tmp, sizeof tmp,
 			"%s~", playlist->a.url);
-	if ((int)sizeof tmp_pathname <= n)
+	if ((int)sizeof tmp <= n)
 		goto fail_open;
 
 	int dirfd = playlist->parent ? playlist->parent->dirfd : AT_FDCWD;
-	int fd = openat(dirfd,
-			tmp_pathname,
-			O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, 0666);
+	int fd = openat(dirfd, tmp, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, 0666);
 	if (fd < 0) {
 	fail_open:
 		print_file_strerror(playlist->parent, &playlist->a,
@@ -1153,7 +1152,7 @@ save_playlist(Playlist *playlist)
 		print_file_strerror(playlist->parent, &playlist->a,
 				"Could not write playlist");
 		fclose(stream);
-		unlink(tmp_pathname);
+		unlink(tmp);
 		return;
 	}
 	fclose(stream);
@@ -1161,8 +1160,8 @@ save_playlist(Playlist *playlist)
 	if (0 <= pid)
 		reap(pid, program);
 
-	if (renameat(dirfd, tmp_pathname, dirfd, playlist->a.url) < 0) {
-		unlink(tmp_pathname);
+	if (renameat(dirfd, tmp, dirfd, playlist->a.url) < 0) {
+		unlink(tmp);
 		print_file_strerror(playlist->parent, &playlist->a,
 				"Could not replace existing playlist");
 		return;
@@ -1469,15 +1468,6 @@ read_metadata(Input const *in)
 
 fail_too_long:
 	print_file_error(playlist, &f->a, "Too much metadata", NULL);
-}
-
-static char const *
-get_config_path(char const *filename)
-{
-	static char pathname[PATH_MAX];
-	snprintf(pathname, sizeof pathname, "%s/%s",
-			getenv("MUCK_HOME"), filename);
-	return pathname;
 }
 
 static void
@@ -3698,12 +3688,16 @@ open_visual_search(void)
 	}
 	fputc('\n', stream);
 
-	char const *pathname = get_config_path("search-history");
-	FILE *history = fopen(pathname, "re");
+	char history_path[PATH_MAX];
+	snprintf(history_path, sizeof history_path,
+			"%s/%s", config_home, "search-history");
+	FILE *history = fopen(history_path, "re");
 	char const *home = getenv("HOME");
 	size_t home_size = strlen(home);
-	int tilde = !strncmp(pathname, home, home_size);
-	fprintf(stream, "# %s%s:\n", tilde ? "~" : "", pathname + (tilde ? home_size : 0));
+	int tilde = !strncmp(history_path, home, home_size);
+	fprintf(stream,
+			"# %s%s:\n",
+			tilde ? "~" : "", history_path + (tilde ? home_size : 0));
 	if (history) {
 		char buf[BUFSIZ];
 		size_t buf_size;
@@ -4141,8 +4135,9 @@ do_cmd(char c, int human)
 					setenv(name, f->a.url + f->metadata[i], 0);
 			}
 
-			char filename[2] = { c };
-			execl(get_config_path(filename), filename, pf.f->a.url, NULL);
+			char exe[PATH_MAX];
+			snprintf(exe, sizeof exe, "%s/%c", config_home, c);
+			execl(exe, exe, pf.f->a.url, NULL);
 			print_error("No binding for '%c'", c);
 
 			_exit(127);
@@ -4240,11 +4235,21 @@ main(int argc, char **argv)
 	{
 		char const *env;
 
-		if (!getenv("MUCK_HOME")) {
-			char pathname[PATH_MAX];
-			snprintf(pathname, sizeof pathname, "%s/.config/muck",
-					getenv("HOME"));
-			xassert(!setenv("MUCK_HOME", pathname, 0));
+		if ((env = getenv("MUCK_HOME"))) {
+			snprintf(config_home, sizeof config_home, "%s", env);
+		} else {
+			if ((env = getenv("XDG_CONFIG_HOME"))) {
+				snprintf(config_home, sizeof config_home,
+						"%s/muck", env);
+			} else {
+				env = getenv("HOME");
+				snprintf(config_home, sizeof config_home,
+						"%s/.config/muck", env);
+				if (access(config_home, F_OK))
+					snprintf(config_home, sizeof config_home,
+							"%s/.muck", env);
+			}
+			xassert(!setenv("MUCK_HOME", config_home, 1));
 		}
 
 		if ((env = getenv("MUCK_COVER"))) {
