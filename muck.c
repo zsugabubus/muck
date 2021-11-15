@@ -373,6 +373,8 @@ static char print_clear = '\0';
 
 static int writable;
 
+static char cover_path[PATH_MAX];
+
 static char const *
 get_playlist_name(Playlist const *playlist)
 {
@@ -1481,11 +1483,10 @@ get_config_path(char const *filename)
 static void
 update_cover(Input const *in)
 {
-	char const *pathname = get_config_path("cover");
-	int fd = open(pathname,
-			O_CLOEXEC |
-			O_RDWR | /* Shared mmap() requires it. */
-			O_TRUNC);
+	char tmp[PATH_MAX];
+	snprintf(tmp, sizeof tmp, "%s~", cover_path);
+
+	int fd = open(tmp, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IRGRP);
 	if (fd < 0)
 		return;
 
@@ -1509,21 +1510,11 @@ update_cover(Input const *in)
 		data_size = sizeof DEFAULT_COVER;
 	}
 
-	ftruncate(fd, data_size);
-
-	void *p = mmap(NULL, data_size, PROT_WRITE, MAP_SHARED, fd, 0);
-	if (MAP_FAILED != p) {
-		memcpy(p, data, data_size);
-		munmap(p, data_size);
-	} else {
+	(void)write(fd, data, data_size);
+	if (close(fd))
 		print_strerror("Could not write cover");
-		ftruncate(fd, 0);
-	}
-
-	/* Notify programs about changing. */
-	futimens(fd, NULL /* Now. */);
-
-	close(fd);
+	else if (rename(tmp, cover_path))
+		print_strerror("Could not rename cover");
 }
 
 static void
@@ -4246,12 +4237,33 @@ main(int argc, char **argv)
 	avdevice_register_all();
 
 	/* Sanitize environment. */
-	if (!getenv("MUCK_HOME")) {
-		char pathname[PATH_MAX];
-		snprintf(pathname, sizeof pathname, "%s/.config/muck",
-				getenv("HOME"));
-		xassert(!setenv("MUCK_HOME", pathname, 0));
+	{
+		char const *env;
+
+		if (!getenv("MUCK_HOME")) {
+			char pathname[PATH_MAX];
+			snprintf(pathname, sizeof pathname, "%s/.config/muck",
+					getenv("HOME"));
+			xassert(!setenv("MUCK_HOME", pathname, 0));
+		}
+
+		if ((env = getenv("MUCK_COVER"))) {
+			snprintf(cover_path, sizeof cover_path, "%s", env);
+		} else {
+			if ((env = getenv("XDG_RUNTIME_DIR"))) {
+				snprintf(cover_path, sizeof cover_path,
+						"%s/muck-cover", env);
+			} else {
+				if (!(env = getenv("TMPDIR")))
+					env = "/tmp";
+				snprintf(cover_path, sizeof cover_path,
+						"%s/muck-%ld-cover", env, (long)getuid());
+			}
+
+			xassert(!setenv("MUCK_COVER", cover_path, 1));
+		}
 	}
+
 
 	xassert(0 <= rnd_init(&rnd));
 

@@ -56,12 +56,9 @@ this limitation, use
 .BR "find | muck" .
 .
 .SS "Cover art"
-When
-.RB $ MUCK_HOME/cover
-exists, cover art of currently playing file is written to it.
-.PP
-Note that it can be a symbolic link (e.g. \[->] /tmp/cover), just be aware that
-some image viewers can detect file time changes on their real path only.
+Cover art is written to
+.RB $ MUCK_COVER .
+If not set, a suitable location is chosen.
 .
 .SH OPTIONS
 .TP
