@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <locale.h>
+#include <ncurses.h>
 #include <poll.h>
 #include <pthread.h>
 #include <regex.h>
@@ -56,30 +58,27 @@
 
 #define CONTROL(c) ((c) - '@')
 
-#define NS_PER_SEC 1000000000
+enum {
+	KEY_FOCUS_IN = 1001,
+	KEY_FOCUS_OUT = 1002,
+};
 
-#define atomic_store_lax(...) atomic_store_explicit(__VA_ARGS__, memory_order_relaxed)
-#define atomic_load_lax(...) atomic_load_explicit(__VA_ARGS__, memory_order_relaxed)
-#define atomic_fetch_sub_lax(...) atomic_fetch_sub_explicit(__VA_ARGS__, memory_order_relaxed)
-#define atomic_fetch_add_lax(...) atomic_fetch_add_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_exchange_lax(...) atomic_exchange_explicit(__VA_ARGS__, memory_order_relaxed)
-
-/* Line-feed that must be used when printing the first line after printing into
- * a dirty terminal line, i.e. after print_progress or editor has been closed. */
-#define LF "\e[K\n"
-#define CR "\e[K\r"
+#define atomic_fetch_add_lax(...) atomic_fetch_add_explicit(__VA_ARGS__, memory_order_relaxed)
+#define atomic_fetch_or_lax(...) atomic_fetch_or_explicit(__VA_ARGS__, memory_order_relaxed)
+#define atomic_fetch_sub_lax(...) atomic_fetch_sub_explicit(__VA_ARGS__, memory_order_relaxed)
+#define atomic_load_lax(...) atomic_load_explicit(__VA_ARGS__, memory_order_relaxed)
+#define atomic_store_lax(...) atomic_store_explicit(__VA_ARGS__, memory_order_relaxed)
 
 #define IS_SUFFIX(haystack, needle) \
 	(strlen(needle) <= haystack##_size && \
 	 !memcmp(haystack + haystack##_size - strlen(needle), needle, strlen(needle)) && \
 	 (haystack##_size -= strlen(needle), 1))
 
-static char const XATTR_LAST_PLAY[] = "user.last_play";
-
 #define ALIGNED_ATOMIC _Alignas(64)
 
 #define COMPRESSORS \
-	/* xmacro(tail, program) */ \
+	/* xmacro(ext, program) */ \
 	xmacro(".bz", "bzip2") \
 	xmacro(".bz2", "bzip2") \
 	xmacro(".gz", "gzip") \
@@ -97,66 +96,72 @@ static char const XATTR_LAST_PLAY[] = "user.last_play";
  *
  */
 #define METADATA \
-	/* xmacro(letter, name) */ \
+	/* xmacro(letter, name, def_width, in_url) */ \
 	/* Contributors first. */ \
-	xmacro('a', artist) \
-	xmacro('A', album_artist) \
-	xmacro('F', album_featured_artist) \
-	xmacro('f', featured_artist) \
-	xmacro('x', remixer) \
+	xmacro('a', artist, 20, 1) \
+	xmacro('A', album_artist, 25, 1) \
+	xmacro('F', album_featured_artist, 15, 1) \
+	xmacro('f', featured_artist, 15, 1) \
+	xmacro('x', remixer, 15, 1) \
 	/* Let barcode be the first album related metadata, since same named \
 	 * albums (with matching album related metadata) can appear from \
 	 * different contributors. This way remaining metadata stays highly \
 	 * compressable even if barcode is different. */ \
-	xmacro('B', barcode) \
+	xmacro('B', barcode, 13, 0) \
 	/* Wrap album title between disc/track totals. */ \
-	xmacro('d', disc) \
-	xmacro('D', disc_total) \
-	xmacro('T', album) \
-	xmacro('V', album_version) \
-	xmacro('N', track_total) \
-	xmacro('n', track) \
+	xmacro('d', disc, 2, 1) \
+	xmacro('D', disc_total, 2, 0) \
+	xmacro('T', album, 25, 1) \
+	xmacro('V', album_version, 15, 1) \
+	xmacro('N', track_total, 2, 0) \
+	xmacro('n', track, 2, 1) \
 	/* Similer titles have higher chance to have the same ISRC. */ \
-	xmacro('I', isrc) \
-	xmacro('t', title) \
-	xmacro('v', version) \
+	xmacro('I', isrc, 12, 0) \
+	xmacro('t', title, 20, 1) \
+	xmacro('v', version, 20, 1) \
 	/* Keep genre around bpm. */ \
-	xmacro('g', genre) \
+	xmacro('g', genre, 35, 0) \
 	/* A label used to release in a few genres with near constant bpm. */ \
-	xmacro('b', bpm) \
-	xmacro('L', label) \
+	xmacro('b', bpm, 3, 0) \
+	xmacro('L', label, 30, 1) \
 	/* Catalog numbers has an alpha prefix that relates to label. Let's put it \
 	 * after label. */ \
-	xmacro('C', catalog) \
-	xmacro('y', date) \
-	xmacro('o', codec) \
-	xmacro('l', last_play) \
-	xmacro('h', mtime) \
-	xmacro('d', duration) \
-	xmacro('z', comment)
+	xmacro('C', catalog, 15, 0) \
+	xmacro('y', date, 10, 0) \
+	xmacro('o', codec, 18, 0) \
+	xmacro('h', mtime, 10, 0) \
+	xmacro('d', duration, 5, 0) \
+	xmacro('z', comment, 20, 0)
 
 /* Extra metadata-like stuff. */
 #define METADATAX \
-	xmacro('u', name) \
-	xmacro('U', url) \
-	xmacro('p', playlist)
+	xmacro('i', index, 0, 0) \
+	xmacro('u', name, 30, 0) \
+	xmacro('U', url, 50, 0) \
+	xmacro('p', playlist, 15, 0)
 
 #define METADATA_ALL METADATA METADATAX
 
 static char const METADATA_LETTERS[] = {
-#define xmacro(letter, name) letter,
+#define xmacro(letter, name, ...) letter,
 	METADATA_ALL
 #undef xmacro
 };
 
 static char const METADATA_NAMES[][24] = {
-#define xmacro(letter, name) #name,
+#define xmacro(letter, name, ...) #name,
+	METADATA_ALL
+#undef xmacro
+};
+
+static uint8_t const METADATA_COLUMN_WIDTHS[] = {
+#define xmacro(letter, name, def_width, ...) def_width,
 	METADATA_ALL
 #undef xmacro
 };
 
 enum Metadata {
-#define xmacro(letter, name) M_##name,
+#define xmacro(letter, name, ...) M_##name,
 	METADATA
 #undef xmacro
 	M_NB,
@@ -164,11 +169,21 @@ enum Metadata {
 
 enum MetadataX {
 	MX_ = M_NB - 1,
-#define xmacro(letter, name) MX_##name,
+#define xmacro(letter, name, ...) MX_##name,
 	METADATAX
 #undef xmacro
 	MX_NB,
 };
+
+/* May present in URL if not among tags. */
+static uint64_t const METADATA_IN_URL =
+#define xmacro(letter, name, def_width, in_url) +(UINT64_C(in_url) << M_##name)
+	METADATA
+#undef xmacro
+#define xmacro(letter, name, def_width, in_url) +(UINT64_C(in_url) << MX_##name)
+	METADATAX
+#undef xmacro
+	;
 
 _Static_assert(MX_NB <= 64);
 
@@ -283,6 +298,7 @@ typedef struct {
 	unsigned nb_audios;
 } Input;
 
+static pthread_t main_thread;
 static pthread_t source_thread, sink_thread;
 static int wakeup_source, wakeup_sink;
 #if CONFIG_VALGRIND
@@ -300,6 +316,8 @@ static unsigned _Atomic cur_track;
 static int64_t _Atomic play_duration;
 static uint64_t _Atomic play_count;
 static atomic_uchar ALIGNED_ATOMIC dump_in0;
+static PlaylistFile top;
+static File *sel;
 
 static struct {
 	BirdLock lock;
@@ -345,6 +363,7 @@ static uint16_t _Atomic ALIGNED_ATOMIC buffer_head, buffer_tail;
 static uint16_t buffer_reap;
 
 static int64_t _Atomic ALIGNED_ATOMIC cur_pts, cur_duration;
+static int64_t notify_pts, notify_duration;
 static atomic_uchar ALIGNED_ATOMIC paused;
 
 static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -352,8 +371,7 @@ static Playlist master;
 
 static uint8_t cur_filter[2]; /**< .[live] is the currently used filter. */
 /* TODO: Queue is live queue has p=^queue$ filter. In non-live mode we can select tracks etc. */
-static atomic_uchar live = 1;
-static atomic_uchar auto_w, auto_i;
+static int live = 1;
 
 static char *search_history[10];
 
@@ -363,18 +381,36 @@ static File *seek_file0;
 static int64_t _Atomic seek_file_pts = AV_NOPTS_VALUE;
 static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
-static int has_number;
+static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vgbIB*LCoh*z";
+
+static char has_number = '\0';
 static int64_t cur_number;
+static int sel_y, sel_x;
+static int scroll_x;
 
-struct termios saved_termios;
-static int win_height, win_width;
-static FILE *tty;
-static char print_clear = '\0';
-
-static int writable;
+static FILE *tty, *fmsg;
+static char msg_path[PATH_MAX];
+static atomic_uchar ALIGNED_ATOMIC focused = 1;
 
 static char config_home[PATH_MAX];
 static char cover_path[PATH_MAX];
+
+static regex_t reg_ucase;
+
+enum Event {
+	EVENT_FILE_CHANGED = 1 << 0,
+	EVENT_STATE_CHANGED = 1 << 1,
+	EVENT_EOF_REACHED = 1 << 2,
+};
+
+static atomic_uchar ALIGNED_ATOMIC pending_events;
+
+static void
+notify_event(enum Event event)
+{
+	if (!atomic_fetch_or_lax(&pending_events, event))
+		pthread_kill(main_thread, SIGRTMIN);
+}
 
 static char const *
 get_playlist_name(Playlist const *playlist)
@@ -387,11 +423,11 @@ print_error(char const *msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	flockfile(tty);
-	fputs("\e[1;31m", tty);
-	vfprintf(tty, msg, ap);
-	fputs("\e[m\n", tty);
-	funlockfile(tty);
+	flockfile(fmsg);
+	fputs("\033[1;31m", fmsg);
+	vfprintf(fmsg, msg, ap);
+	fputs("\033[m\n", fmsg);
+	funlockfile(fmsg);
 	va_end(ap);
 }
 
@@ -455,7 +491,7 @@ probe_url(Playlist const *parent, char const *url)
 
 	size_t url_size = strlen(url);
 
-#define xmacro(tail, program) || IS_SUFFIX(url, tail)
+#define xmacro(ext, program) || IS_SUFFIX(url, ext)
 	enum FileType playlist_type = 0 COMPRESSORS
 		? F_PLAYLIST_COMPRESSED
 		: F_PLAYLIST;
@@ -474,7 +510,7 @@ probe_compressor(char const *url)
 {
 	size_t url_size = strlen(url);
 
-#define xmacro(tail, program) if (IS_SUFFIX(url, tail)) return program;
+#define xmacro(ext, program) if (IS_SUFFIX(url, ext)) return program;
 	COMPRESSORS
 #undef xmacro
 
@@ -638,17 +674,15 @@ append_file(Playlist *parent, enum FileType type)
 static void
 print_playlist_error(Playlist const *playlist, int color, char const *msg, size_t lnum, size_t col)
 {
-	flockfile(tty);
-	fprintf(tty, "\e[1;%dm", color);
-	fputs(get_playlist_name(playlist), tty);
-	fputs(":", tty);
+	fprintf(fmsg, "\033[1;%dm", color);
+	fputs(get_playlist_name(playlist), fmsg);
+	fputs(":", fmsg);
 	if (lnum) {
-		fprintf(tty, "%zu:", lnum);
+		fprintf(fmsg, "%zu:", lnum);
 		if (col)
-			fprintf(tty, "%zu:", col);
+			fprintf(fmsg, "%zu:", col);
 	}
-	fprintf(tty, " %s\e[m\n", msg);
-	funlockfile(tty);
+	fprintf(fmsg, " %s\033[m\n", msg);
 }
 
 static void
@@ -979,7 +1013,7 @@ compress_playlist(Playlist *playlist, int *pfd, pid_t *ppid, char const **pprogr
 					do_compress
 						? "Could not compress playlist"
 						: "Could not decompress playlist");
-		_exit(127);
+		_exit(EXIT_FAILURE);
 	}
 
 	close(pipes[!do_compress]);
@@ -1110,8 +1144,7 @@ save_playlist(Playlist *playlist)
 	    !playlist->files)
 		return;
 
-	fprintf(tty, "Saving %s..."CR, playlist->a.url);
-	fflush(tty);
+	fprintf(fmsg, "Saving %s...\n", playlist->a.url);
 
 	char tmp[PATH_MAX];
 
@@ -1216,23 +1249,6 @@ fdata_write_date(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, t
 	tmpf->metadata[m] = *fdata_size;
 	fdata[*fdata_size + n] = '\0';
 	*fdata_size += n + 1 /* NUL */;
-
-	return 0;
-}
-
-static int
-fdata_write_xattr(Input const *in, File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char const *name)
-{
-	size_t size = (UINT16_MAX - 1 /* NUL */) - *fdata_size;
-	ssize_t n = fgetxattr(in->fd, name, fdata + *fdata_size, size);
-	if (0 < n) {
-		if (size <= (size_t)n)
-			return -1;
-
-		tmpf->metadata[m] = *fdata_size;
-		fdata[*fdata_size + n] = '\0';
-		*fdata_size += n + 1 /* NUL */;
-	}
 
 	return 0;
 }
@@ -1433,9 +1449,6 @@ read_metadata(Input const *in)
 		if (rc < 0)
 			goto fail_too_long;
 	}
-
-	if (fdata_write_xattr(in, &tmpf, fdata, &fdata_size, M_last_play, XATTR_LAST_PLAY) < 0)
-		goto fail_too_long;
 
 	if (!playlist->modified) {
 		for (enum Metadata i = 0; i < M_NB; ++i)
@@ -1664,8 +1677,9 @@ print_stream(char **pbuf, int *pn, Stream const *s, int output)
 
 	if (AV_CH_LAYOUT_STEREO != s->codec_ctx->channel_layout) {
 		sbprintf(pbuf, pn, ", ");
-		int k = (av_get_channel_layout_string(*pbuf, *pn,
-				s->codec_ctx->channels, s->codec_ctx->channel_layout), strlen(*pbuf) /* Thanks. */);
+		av_get_channel_layout_string(*pbuf, *pn,
+				s->codec_ctx->channels, s->codec_ctx->channel_layout);
+		int k = strlen(*pbuf);
 		*pbuf += k;
 		*pn -= k;
 	}
@@ -1934,181 +1948,19 @@ get_parent(Playlist const *ancestor, AnyFile const *a)
 	return NULL;
 }
 
-static void
-print_file(File const *f, int highlight)
-{
-	char const *str;
-
-	flockfile(tty);
-
-	fprintf(tty, "%s\e[37m%6"PRIu64"\e[m ",
-			highlight ? "\e[1;33m>\e[m" : " ",
-			get_file_index((PlaylistFile){
-				.p = get_parent(&master, &f->a),
-				.f = (File *)f,
-			}));
-#define M(name) (f->metadata[M_##name] && (str = f->a.url + f->metadata[M_##name]))
-
-	if (!M(album_artist) && !M(artist) && !M(title)) {
-		if (F_FILE == f->a.type) {
-			if (!(str = strrchr(f->a.url, '/')))
-				str = f->a.url;
-			else
-				++str;
-
-			int has_space = 0;
-			size_t dots = 0;
-			size_t dashes = 0;
-			size_t lowlines = 0;
-			for (char const *s = str; *s; ++s) {
-				dots += '.' == *s;
-				dashes += '-' == *s;
-				lowlines += '_' == *s;
-				has_space |= ' ' == *s;
-			}
-			if (has_space || !(dots | dashes | lowlines)) {
-				fputs(str, tty);
-			} else {
-				size_t n = dots;
-				char space = '.';
-
-				if (n <= dashes)
-					n = dashes, space = '-';
-
-				if (n <= lowlines)
-					n = lowlines, space = '_';
-
-				for (char const *s = str; *s; ++s)
-					fputc(space == *s ? ' ' : *s, tty);
-			}
-		} else {
-			fputs(f->a.url, tty);
-		}
-	} else {
-#define PRINT_NUMBER(name) \
-		if (!(M(name##_total) && \
-		      !memcmp(str, "1", 2)) && \
-		    M(name)) \
-		{ \
-			fputc('(', tty); \
-			fputs(str, tty); \
-			if (M(name##_total)) { \
-				fputc('/', tty); \
-				fputs(str, tty); \
-			} \
-			fputs(") ", tty); \
-		}
-
-#define PRINT_TITLE(params, title, version) \
-		if (M(title)) { \
-			fprintf(tty, "\e["params"m%s\e[m", str); \
-			if (M(version)) \
-				fprintf(tty, " (\e["params"m%s\e[m)", str); \
-		} else { \
-			fputs("ID", tty); \
-		}
-
-		if (M(date))
-			fprintf(tty, "%-10s ", str);
-
-		/* Artist 1;Artist 2 */
-		if (M(album_artist)) {
-			char const *d = str;
-			int any = 0;
-
-			for (char const *s = str; *s;) {
-				char const *p = strchr(s, ';');
-				if (!p)
-					p = s + strlen(s);
-				if (any)
-					fputc(';', tty);
-				any = 1;
-				fprintf(tty, "\e[m%.*s\e[m", (int)(p - s), s);
-				if (*(s = p))
-					++s;
-			}
-
-			if (M(artist)) {
-				size_t dn = strlen(d);
-				for (char const *s = str; *s;) {
-					char const *p = strchr(s, ';');
-					size_t sn = p ? (size_t)(p - s) : strlen(s);
-					char const *q = memmem(d, dn, s, sn);
-
-					if (!q ||
-					    ('\0' != q[-1] && ';' != q[-1]) ||
-					    ('\0' != q[sn] && ';' != q[sn]))
-					{
-						if (any)
-							fputc(';', tty);
-						any = 1;
-						fprintf(tty, "\e[m%.*s\e[m", (int)(p - s), s);
-					}
-
-					if (p)
-						s = p + 1;
-					else
-						break;
-				}
-			}
-		} else if (M(artist)) {
-			fputs(str, tty);
-		} else {
-			fputs("ID", tty); \
-		}
-		fputs(" - ", tty);
-
-		if (80 <= win_width) {
-			/* 01/01. [CATALOG] Album Title (Album Version) [LABEL] [BARCODE] */
-			PRINT_NUMBER(disc);
-
-			if (M(catalog))
-				fprintf(tty, "[%s] ", str);
-
-			PRINT_TITLE("", album, album_version);
-
-			if (M(label))
-				fprintf(tty, " [%s]", str);
-
-			if (M(barcode))
-				fprintf(tty, " [BARCODE %s]", str);
-			fputs(" / ", tty);
-		}
-
-		/* 01/22. Track Title (Track Version) (ft. Artist3;Artist4) [ISRC] {Genre 1;Genre2} */
-
-		PRINT_NUMBER(track);
-		PRINT_TITLE(";1", title, version);
-		/* ;33;40 */
-
-		if (M(featured_artist))
-			fprintf(tty, " (ft. \e[m%s\e[m)", str);
-
-		if (M(isrc))
-			fprintf(tty, " [ISRC %s]", str);
-
-		if (M(genre))
-			fprintf(tty, " {%s}", str);
-	}
-
-	if (M(comment))
-		fprintf(tty, " \e[37m%s\e[m", str);
-
-#undef M
-
-	if (highlight)
-		fputs(" \e[1;33m<\e[m", tty);
-	fputs("\e[K\n", tty);
-
-	funlockfile(tty);
-}
-
 static char const *
 get_metadata(Playlist const *playlist, File const *f, enum MetadataX m)
 {
 	if (m < (enum MetadataX)M_NB)
 		return f->metadata[m] ? f->a.url + f->metadata[m] : NULL;
 	else switch (m) {
+	case MX_index:
+	{
+		static char buf[50];
+		sprintf(buf, "%"PRIu64, get_file_index((PlaylistFile){ (Playlist *)playlist, (File *)f }));
+		return buf;
+	}
+
 	case MX_url:
 		return f->a.url;
 
@@ -2128,14 +1980,6 @@ get_metadata(Playlist const *playlist, File const *f, enum MetadataX m)
 	default:
 		abort();
 	}
-}
-
-static int
-has_metadata(File const *f)
-{
-	return
-		f->metadata[M_artist] &&
-		f->metadata[M_title];
 }
 
 static int
@@ -2163,7 +2007,7 @@ collect_stat(Statistics *s, AnyFile *a)
 #define COLLECT(S_type) \
 	s->duration[S_type] += duration; \
 	s->nb_unscanned[S_type] += !f->metadata[M_duration]; \
-	s->nb_untagged[S_type] += f->metadata[M_duration] && !has_metadata(f);
+	s->nb_untagged[S_type] += !f->metadata[M_title];
 
 	COLLECT(S_TOTAL);
 
@@ -2227,9 +2071,6 @@ print_stat(void)
 
 	Statistics s = calc_stat();
 
-	flockfile(tty);
-	fputs("\e[J", tty);
-
 	int lines = 0;
 	for (struct Descriptor const *d = DESCRIPTION;
 	     d < (&DESCRIPTION)[1];
@@ -2237,25 +2078,25 @@ print_stat(void)
 	{
 		switch (d->type | ' ') {
 		case 't': /* Unformatted text. */
-			fputs(d->str, tty);
+			fputs(d->str, fmsg);
 			break;
 
 		case 's': /* Section. */
-			fprintf(tty, "\e[1m%-*.*s\e[m",
+			fprintf(fmsg, "\033[1m%-*.*s\033[m",
 					(int)ARRAY_SIZE(d->str) + 3,
 					(int)ARRAY_SIZE(d->str),
 					d->str);
 			break;
 
 		case 'h': /* Table header. */
-			fprintf(tty, "%*.*s",
+			fprintf(fmsg, "%*.*s",
 					TABLE_COLUMN_WIDTH,
 					(int)ARRAY_SIZE(d->str),
 					d->str);
 			break;
 
 		default:
-			fprintf(tty, " %-*.*s :",
+			fprintf(fmsg, " %-*.*s :",
 					(int)ARRAY_SIZE(d->str),
 					(int)ARRAY_SIZE(d->str),
 					d->str);
@@ -2283,12 +2124,12 @@ print_stat(void)
 					int64_t seconds = *(int64_t *)data;
 					int64_t days = seconds / (3600 * 24);
 					if (days)
-						fprintf(tty, "%*"PRIu64" days",
+						fprintf(fmsg, "%*"PRIu64" days",
 								TABLE_COLUMN_WIDTH - 14,
 								days);
 					else
-						fprintf(tty, "%*c", 6 + 1 + 5, 0);
-					fprintf(tty, " %02u:%02u:%02u",
+						fprintf(fmsg, "%*c", 6 + 1 + 5, 0);
+					fprintf(fmsg, " %02u:%02u:%02u",
 							(unsigned)(seconds / 3600 % 24),
 							(unsigned)(seconds / 60 % 60),
 							(unsigned)(seconds % 60));
@@ -2296,7 +2137,7 @@ print_stat(void)
 					break;
 
 				case 'n':
-					fprintf(tty, "%*"PRIu64,
+					fprintf(fmsg, "%*"PRIu64,
 							TABLE_COLUMN_WIDTH,
 							*(uint64_t *)data);
 					break;
@@ -2305,13 +2146,10 @@ print_stat(void)
 		}
 
 		if (!(' ' & d->type)) {
-			fputc('\n', tty);
+			fputc('\n', fmsg);
 			++lines;
 		}
 	}
-
-	fprintf(tty, "\e[%dF", lines);
-	funlockfile(tty);
 }
 
 static uint64_t
@@ -2355,11 +2193,11 @@ match_file(Playlist *parent, AnyFile *a, uint8_t filter_index, Clause const *cla
 			 * file. This way user can avoid nasty queries in a new
 			 * playlist. */
 			if (!value &&
-			    ((enum MetadataX)M_artist == m ||
-			     (enum MetadataX)M_title == m) &&
-			    !has_metadata(f))
+			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
+			    !f->metadata[M_duration])
+			{
 				value = f->a.url;
-			else if (!value) {
+			} else if (!value) {
 				if (!clause->not)
 					goto no_match;
 				else
@@ -2431,13 +2269,13 @@ static PlaylistFile
 get_current_pf(void)
 {
 	PlaylistFile ret;
-	ret.f = atomic_load_lax(&in0.pf.f);
+	ret.f = live ? in0.pf.f : sel;
 	ret.p = ret.f ? get_parent(&master, &ret.f->a) : NULL;
 	return ret;
 }
 
 static AnyFile *
-get_playlist_begin(Playlist const *playlist, int dir)
+get_playlist_start(Playlist const *playlist, int dir)
 {
 	return (void *)((char *)playlist->files + (
 		0 <= dir
@@ -2449,7 +2287,7 @@ get_playlist_begin(Playlist const *playlist, int dir)
 static AnyFile *
 get_playlist_end(Playlist const *playlist, int dir)
 {
-	return get_playlist_begin(playlist, -dir);
+	return get_playlist_start(playlist, -dir);
 }
 
 #define POS_RND INT64_MIN
@@ -2471,6 +2309,7 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 
 	int dir = 1;
 	if (POS_RND == pos) {
+		assert(cur);
 		/* Tweak randomness a bit to make sure we do not play twice the
 		 * same file one after another. */
 		if (max <= 1)
@@ -2487,15 +2326,9 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 
 
 	AnyFile const *a;
-	if (SEEK_CUR == whence) {
-		PlaylistFile tmp;
-		if (!cur) {
-			tmp.f = atomic_load_lax(&in0.pf.f);
-			tmp.p = tmp.f ? get_parent(&master, &tmp.f->a) : NULL;
-			cur = &tmp;
-		}
+	if (SEEK_CUR == whence && cur->f) {
 		playlist = cur->p;
-		a = cur->f ? &cur->f->a : &master.a;
+		a = &cur->f->a;
 	} else {
 		a = &playlist->a;
 		playlist = playlist->parent;
@@ -2513,7 +2346,7 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 			} else {
 				/* Step in. */
 				playlist = (void *)a;
-				a = get_playlist_begin(p, dir);
+				a = get_playlist_start(p, dir);
 				continue;
 			}
 		}
@@ -2535,7 +2368,7 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 		/* Wrap around. */
 		if (!playlist) {
 			playlist = (void *)a;
-			a = get_playlist_begin(playlist, dir);
+			a = get_playlist_start(playlist, dir);
 		} else if (0 <= dir) {
 			PTR_INC(a, get_file_size(a->type));
 		} else {
@@ -2546,6 +2379,63 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 	assert(a->type <= F_FILE);
 	assert(F_FILE < playlist->a.type);
 	return (PlaylistFile){ (Playlist *)playlist, (File *)a, };
+}
+
+static int
+spawn(void)
+{
+	endwin();
+
+	pid_t pid;
+	if (!(pid = fork())) {
+		xassert(!dup2(fileno(tty), STDIN_FILENO));
+
+		struct sigaction sa;
+		sigemptyset(&sa.sa_mask);
+
+		sa.sa_handler = SIG_DFL;
+
+		xassert(!sigaction(SIGCONT, &sa, NULL));
+		xassert(!sigaction(SIGWINCH, &sa, NULL));
+		xassert(!sigaction(SIGINT, &sa, NULL));
+		xassert(!sigaction(SIGHUP, &sa, NULL));
+		xassert(!sigaction(SIGTERM, &sa, NULL));
+		xassert(!sigaction(SIGQUIT, &sa, NULL));
+		xassert(!sigaction(SIGPIPE, &sa, NULL));
+		xassert(!sigaction(SIGRTMIN, &sa, NULL));
+
+		xassert(!pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL));
+		return 0;
+	}
+
+	int rc;
+	for (;;) {
+		int status;
+		if (waitpid(pid, &status, 0) < 0) {
+			rc = -1;
+			break;
+		}
+
+		rc = WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status) ? 1 : -1;
+		break;
+	}
+
+	refresh();
+
+	return rc;
+}
+
+static void
+show_messages(void)
+{
+	fflush(fmsg);
+	if (!spawn()) {
+		char const *pager = getenv("PAGER");
+		if (!pager)
+			pager = "less";
+		execlp(pager, pager, "-rf", "-+ceEFX", "--", msg_path, NULL);
+		_exit(EXIT_FAILURE);
+	}
 }
 
 /**
@@ -2723,7 +2613,11 @@ append:;
 
 			memcpy(clause->str, buf, buf_size);
 		} else {
-			int rc = regcomp(&clause->reg, buf, REG_EXTENDED | REG_ICASE | REG_NOSUB);
+			int flags = REG_EXTENDED | REG_NOSUB;
+			if (REG_NOMATCH == regexec(&reg_ucase, buf, 0, NULL, 0))
+				flags |= REG_ICASE;
+
+			int rc = regcomp(&clause->reg, buf, flags);
 			if (rc) {
 				regerror(rc, &clause->reg, buf, sizeof buf);
 				error_msg = buf;
@@ -2750,33 +2644,32 @@ append:;
 		goto append;
 	}
 
-	fprintf(tty, "Searching for \e[1m%s\e[m..."LF, orig);
-
 	uint8_t filter_index = 0;
 	match_file(NULL, &master.a, filter_index, clauses, clause - clauses);
 
 	struct timespec finish;
 	xassert(!clock_gettime(CLOCK_MONOTONIC, &finish));
 
-	double elapsed = ((finish.tv_sec - start.tv_sec) * NS_PER_SEC + (finish.tv_nsec - start.tv_nsec)) / (double)NS_PER_SEC;
-
-	fprintf(tty, "Search finished in %.3f s: ", elapsed);
-	uint64_t total = master.child_filter_count[filter_index];
-	if (total)
-		fprintf(tty, "\e[1;32m%"PRIu64, total);
-	else
-		fputs("\e[1;31mNo", tty);
-	fputs(" files matched\e[m\n", tty);
+	static long const NS_PER_SEC = 1000000000;
+	double elapsed =
+		((finish.tv_sec - start.tv_sec) * NS_PER_SEC +
+		 (finish.tv_nsec - start.tv_nsec)) /
+		(double)NS_PER_SEC;
+	fprintf(fmsg, "Search finished in %.3f s: ", elapsed);
 
 cleanup:
 	if (error_msg) {
-		fprintf(tty, "\e[1;31mError: %s\e[m"LF, error_msg);
+		endwin();
 
+		fprintf(tty, "\033[2J\033[1;31mError: %s\033[m\n", error_msg);
 		fprintf(tty, "%s\n", orig);
-		fprintf(tty, "\e[%uG\e[1;31m^", (unsigned)(s - orig) + 1);
+		fprintf(tty, "\033[%uG\033[1;31m^", (unsigned)(s - orig) + 1);
 		while (++s < p)
 			fputc('~', tty);
-		fputs("\e[m\n", tty);
+		fputs("\033[m\n", tty);
+		getchar();
+
+		refresh();
 	}
 
 	while (clauses < clause--)
@@ -2785,63 +2678,21 @@ cleanup:
 }
 
 static void
-print_progress(int force)
+notify_progress(void)
 {
-	static int64_t _Atomic old_clock = 0, old_duration = 0;
+	if (!atomic_load_lax(&focused))
+		return;
 
-	int64_t clock = atomic_load_lax(&cur_pts);
+	int64_t pts = atomic_load_lax(&cur_pts);
 	int64_t duration = atomic_load_lax(&cur_duration);
 
-	/* Maybe a bit off, but who cares. */
-	if (!force &&
-	    clock == atomic_load_lax(&old_clock) &&
-	    duration == atomic_load_lax(&old_duration))
+	if (pts == notify_pts && duration == notify_duration)
 		return;
 
-	if (ftrylockfile(tty))
-		return;
+	notify_pts = pts;
+	notify_duration = duration;
 
-	atomic_store_lax(&old_clock, clock);
-	atomic_store_lax(&old_duration, duration);
-
-	fprintf(tty, "%"PRId64"%c%c%c ",
-			cur_number,
-			has_number ? '?' : '\0',
-			seek_cmd,
-			live ? (atomic_load_lax(&paused) ? '.' : '>') : '&');
-
-	fprintf(tty, "%3"PRId64":%02u / %3"PRId64":%02u (%3u%%)",
-			clock / 60, (unsigned)(clock % 60),
-			duration / 60, (unsigned)(duration % 60),
-			duration ? (unsigned)(clock * 100 / duration) : 0);
-
-	{
-		unsigned k = atomic_load_lax(&cur_track) + 1,
-		         n = atomic_load_lax(&in0.nb_audios);
-		if (1 < (k | n))
-			fprintf(tty, " Track: %d/%d", k, n);
-	}
-
-	{
-		int v = atomic_load_lax(&volume);
-		if (100 != v)
-			fprintf(tty, " Vol: % 3d%%", v);
-	}
-
-	if (unlikely(AV_LOG_DEBUG <= av_log_get_level())) {
-		uint16_t len = atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head);
-		fprintf(tty, " buf:%"PRId64"kB low:%"PRId64"kB usr:%"PRId64"kB max:%"PRId64"kB pkt:%d",
-				atomic_load_lax(&buffer_bytes) / 1024,
-				atomic_load_lax(&buffer_low) / 1024,
-				atomic_load_lax(&buffer_bytes_max) / 1024,
-				len ? atomic_load_lax(&buffer_bytes) * (UINT16_MAX + 1) / len / 1024 : -1,
-				len);
-	}
-
-	fputs(CR, tty);
-	if (!print_clear)
-		print_clear = 'K';
-	funlockfile(tty);
+	notify_event(EVENT_STATE_CHANGED);
 }
 
 static void
@@ -2900,72 +2751,6 @@ seek_player(int64_t ts, int whence)
 	do_wakeup(&wakeup_source, NULL);
 }
 
-static void
-print_now_playing(void)
-{
-	char buf[20];
-	strftime(buf, sizeof buf, "\e[1;33m%R> \e[m", localtime(&(time_t){ time(NULL) }));
-	fputs(buf, tty);
-}
-
-static void
-print_format(void)
-{
-	fprintf(tty, "%s -> %s"LF,
-			source_info.buf[birdlock_rd_acquire(&source_info.lock)],
-			sink_info.buf[birdlock_rd_acquire(&sink_info.lock)]);
-}
-
-static void
-print_around(PlaylistFile pf)
-{
-	PlaylistFile from = pf, to = pf;
-	/* Hard limits to avoid wrap around. */
-	PlaylistFile from_stop = seek_playlist(&master, NULL, 0, SEEK_SET),
-	             to_stop = seek_playlist(&master, NULL, 0, SEEK_END);
-	int height = (win_height - 1) * 3 / 8;
-	/* Maximum number of visible lines in direction. */
-	int from_lim = height * 3 / 8, to_lim = height - from_lim;
-
-	int64_t from_offset = 0, to_offset = 0;
-
-	/* No files matched filter. */
-	if (!from_stop.f)
-		return;
-
-	/* Step in direction as much as possible. */
-#define WALK(from, step) \
-	while (0 < from##_lim && from.f != from##_stop.f) \
-		from = seek_playlist(&master, &from, step, SEEK_CUR), \
-		from##_offset += step, \
-		--from##_lim;
-
-	WALK(to, 1);
-	from_lim += to_lim;
-	WALK(from, -1);
-	to_lim = height;
-
-#undef WALK
-
-	flockfile(tty);
-	int lines = win_height / 8;
-	if (lines < 4)
-		lines = 4;
-	fprintf(tty, "\e[?7l" "\e[J" "\e[%dB", lines);
-	for (;;) {
-		print_file(from.f, !from_offset);
-		if (to_lim <= 0 || from.f == to_stop.f)
-			break;
-		from = seek_playlist(&master, &from, 1, SEEK_CUR);
-		++from_offset;
-		--to_lim;
-		++lines;
-	}
-	fprintf(tty, "\e[?7h" "\e[%dF", lines + 1);
-	print_clear = 'J';
-	funlockfile(tty);
-}
-
 static int
 seek_buffer(int64_t target_pts)
 {
@@ -2998,26 +2783,6 @@ seek_buffer(int64_t target_pts)
 }
 
 static void
-update_title(File const *f)
-{
-	if (ftrylockfile(tty))
-		return;
-	fputs("\e]0;", tty);
-	if (f && f->metadata[M_title]) {
-		/* Note that metadata is free from control characters. */
-		fputs(f->a.url + f->metadata[M_title], tty);
-		if (f->metadata[M_version])
-			fprintf(tty, " (%s)", f->a.url + f->metadata[M_version]);
-	} else if (f) {
-		fputs(f->a.url, tty);
-	} else {
-		fputs("muck", tty);
-	}
-	fputc('\a', tty);
-	funlockfile(tty);
-}
-
-static void
 update_input_info(void)
 {
 	char *buf = source_info.buf[birdlock_wr_acquire(&source_info.lock)];
@@ -3034,58 +2799,9 @@ update_input_info(void)
 			sbprintf(&buf, &n, "; cover_front(none)");
 	}
 	birdlock_wr_release(&source_info.lock);
-
-	update_title(in0.pf.f);
 }
 
-static void
-record_play(Input const *in, int64_t cur_play_duration)
-{
-	if (cur_play_duration < 1)
-		return; /* Noise. */
-
-	int64_t percent = cur_play_duration * 100 / cur_duration;
-
-	/* fprintf(tty, "Listened for %"PRId64" sec (%3"PRId64"%%)"LF,
-			cur_play_duration, percent); */
-
-	if (50 <= percent)
-		atomic_store_lax(&play_count, play_count + 1);
-
-	if (!writable || in->fd < 0)
-		return;
-
-	return;
-
-	xassert(!pthread_mutex_lock(&file_lock));
-	File *f = in->pf.f;
-
-	char buf[50];
-	int n;
-
-	n = strftime(buf, sizeof buf, "%F",
-			gmtime(&(time_t){ time(NULL) }));
-	if (fsetxattr(in->fd, XATTR_LAST_PLAY, buf, n, 0) < 0) {
-		print_file_strerror(in->pf.p, &f->a, "Could not write extended attribute");
-		goto out;
-	}
-
-	read_metadata(in);
-
-out:
-	xassert(!pthread_mutex_unlock(&file_lock));
-}
-
-static void
-ftryflush(FILE *stream)
-{
-	if (!ftrylockfile(stream)) {
-		fflush(stream);
-		funlockfile(stream);
-	}
-}
-
-static void do_cmd(char c, int human);
+static void do_key(int c);
 
 static void *
 source_worker(void *arg)
@@ -3100,8 +2816,7 @@ source_worker(void *arg)
 		goto terminate;
 	}
 
-	int64_t begin_listen_ts = 0;
-	int discont = 0;
+	int flush_output = 0;
 	enum {
 		S_RUNNING,
 		S_STOPPED,
@@ -3121,13 +2836,6 @@ source_worker(void *arg)
 			xassert(!pthread_mutex_lock(&file_lock));
 			/* Maybe deleted. */
 			if (likely(seek_file0)) {
-				int64_t cur_listen_ts = atomic_load_lax(&play_duration);
-				int64_t cur_play_duration =
-					av_rescale(cur_listen_ts - begin_listen_ts,
-							1, AV_TIME_BASE);
-				record_play(&in0, cur_play_duration);
-				begin_listen_ts = cur_listen_ts;
-
 				close_input(&in0);
 
 				atomic_store_lax(&in0.pf.f, seek_file0);
@@ -3137,34 +2845,22 @@ source_worker(void *arg)
 				open_input(&in0);
 				update_cover(&in0);
 				update_input_info();
-				print_progress(1);
+				if (atomic_load_lax(&focused))
+					notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 
 				/* Otherwise would be noise. */
 				if (in0.s.codec_ctx) {
 					state = S_RUNNING;
-
-					if (!ftrylockfile(tty)) {
-						if (atomic_load_lax(&auto_i))
-							print_format();
-						print_now_playing();
-						print_file(in0.pf.f, 0);
-						if (atomic_load_lax(&auto_w))
-							print_around(in0.pf);
-						funlockfile(tty);
-					}
 				} else {
 					xassert(!pthread_mutex_unlock(&file_lock));
-					ftryflush(tty);
 					/* Do not flush buffer yet. */
 					goto seek;
 				}
 
-				ftryflush(tty);
-
 				seek_buffer(INT64_MIN);
 				atomic_store_lax(&seek_pts, seek_file_pts);
 
-				discont = 0; /* TODO: Eh... seek by user =>flush or automatic =>no flush? */
+				flush_output = 0; /* TODO: Eh... seek by user =>flush or automatic =>no flush? */
 			}
 			xassert(!pthread_mutex_unlock(&file_lock));
 		}
@@ -3194,7 +2890,7 @@ source_worker(void *arg)
 			if (seek_buffer(target_pts))
 				goto wakeup_sink;
 
-			discont = 1;
+			flush_output = 1;
 
 			/* Maybe interesting: out.codec_ctx->delay. */
 
@@ -3218,10 +2914,7 @@ source_worker(void *arg)
 			seek:;
 				state = S_STALLED;
 				/* TODO: Seek commands should fill in1 first. */
-
-				xassert(!pthread_mutex_lock(&file_lock));
-				do_cmd(CONTROL('J'), 0);
-				xassert(!pthread_mutex_unlock(&file_lock));
+				notify_event(EVENT_EOF_REACHED);
 			}
 
 			atomic_store_lax(&buffer_low, S_RUNNING == state
@@ -3272,9 +2965,9 @@ source_worker(void *arg)
 
 			AVDictionaryEntry const *t = av_dict_get(in->s.format_ctx->metadata, "StreamTitle", NULL, 0);
 			if (t) {
-				print_now_playing();
-				fprintf(tty, "[ICY] %s"LF, t->value);
-				print_progress(1);
+				char buf[20];
+				strftime(buf, sizeof buf, "%a %d %R", localtime(&(time_t){ time(NULL) }));
+				fprintf(fmsg, "%s ICY: %s\n", buf, t->value);
 			}
 		}
 
@@ -3293,8 +2986,8 @@ source_worker(void *arg)
 			frame->pts = av_rescale(frame->pts,
 					in->s.audio->time_base.num,
 					in->s.audio->time_base.den);
-			frame->opaque = (void *)(size_t)discont;
-			discont = 0;
+			frame->opaque = (void *)(size_t)flush_output;
+			flush_output = 0;
 
 			atomic_store_lax(&cur_duration,
 					AV_NOPTS_VALUE == in0.s.format_ctx->duration
@@ -3309,11 +3002,9 @@ source_worker(void *arg)
 				do_wakeup(&wakeup_sink, NULL);
 			}
 
-			print_progress(0);
+			notify_progress();
 		} else if (AVERROR(EAGAIN) != rc)
 			print_averror("Could not decode frame", rc);
-
-		ftryflush(tty);
 	}
 
 terminate:
@@ -3401,9 +3092,7 @@ sink_worker(void *arg)
 			rc = configure_graph(pars);
 		if (unlikely(rc < 0)) {
 			atomic_store_lax(&paused, 1);
-
-			print_progress(1);
-			ftryflush(tty);
+			notify_event(EVENT_STATE_CHANGED);
 			continue;
 		}
 
@@ -3426,8 +3115,7 @@ sink_worker(void *arg)
 
 		atomic_store_lax(&cur_pts, frame->pts);
 
-		print_progress(0);
-		ftryflush(tty);
+		notify_progress();
 
 		frame->pts = out_dts;
 		frame->pkt_dts = out_dts;
@@ -3462,8 +3150,6 @@ sink_worker(void *arg)
 		}
 		if (unlikely(AVERROR(EAGAIN) != rc))
 			print_averror("Could not receive encoded frame", rc);
-
-		ftryflush(tty);
 	}
 
 terminate:
@@ -3481,10 +3167,10 @@ save_master(void)
 }
 
 static void
-do_cleanup(void)
+bye(void)
 {
-	fputs("Saving playlists..."CR, tty);
-	fflush(tty);
+	endwin();
+
 	xassert(!pthread_mutex_lock(&file_lock));
 	save_master();
 	xassert(!pthread_mutex_unlock(&file_lock));
@@ -3494,28 +3180,22 @@ do_cleanup(void)
 		atomic_store_lax(&terminate, 1);
 		do_wakeup(&wakeup_source, &wakeup_sink);
 
-		fputs("Waiting for producer thread to exit..."CR, tty);
-		fflush(tty);
 		xassert(!pthread_join(source_thread, NULL));
 
-		fputs("Waiting for consumer thread to exit..."CR, tty);
-		fflush(tty);
 		xassert(!pthread_join(sink_thread, NULL));
 	}
 
-	fputs("Destroying locks..."CR, tty);
-	fflush(tty);
 	xassert(!pthread_mutex_destroy(&buffer_lock));
 	xassert(!pthread_mutex_destroy(&file_lock));
 	xassert(!pthread_cond_destroy(&buffer_wakeup));
 
-	fputs("Releasing resources..."CR, tty);
-	fflush(tty);
 	cleanup_file(&master.a);
 
 	close_input(&in0);
 	close_output();
 	close_graph();
+
+	regfree(&reg_ucase);
 
 	uint16_t i = 0;
 	do
@@ -3525,31 +3205,6 @@ do_cleanup(void)
 	for (size_t i = 0; i < ARRAY_SIZE(search_history); ++i)
 		free(search_history[i]);
 #endif
-
-	fputs(CR, tty);
-	fclose(tty);
-}
-
-static void
-restore_tty(void)
-{
-	tcsetattr(fileno(tty), TCSAFLUSH, &saved_termios);
-}
-
-static void
-save_tty(void)
-{
-	tcgetattr(fileno(tty), &saved_termios);
-	atexit(restore_tty);
-}
-
-static void
-setup_tty(void)
-{
-	struct termios raw = saved_termios;
-	raw.c_lflag &= ~(ECHO | ICANON);
-	raw.c_lflag |= ISIG; /* Enable ^Z, ^C... */
-	tcsetattr(fileno(tty), TCSAFLUSH, &raw);
 }
 
 static void
@@ -3559,80 +3214,6 @@ play_file(File *f, int64_t pts)
 	atomic_store_lax(&seek_file_pts, pts);
 	atomic_store_lax(&seek_file0, f);
 	do_wakeup(&wakeup_source, NULL);
-}
-
-static void
-handle_sigwinch(int sig)
-{
-	(void)sig;
-
-	struct winsize w;
-	if (!ioctl(fileno(tty), TIOCGWINSZ, &w)) {
-		win_height = w.ws_row;
-		win_width = w.ws_col;
-	}
-}
-
-static void
-handle_sigcont(int sig)
-{
-	(void)sig;
-	setup_tty();
-}
-
-static void
-handle_sigexit(int sig)
-{
-	(void)sig;
-	exit(EXIT_SUCCESS);
-}
-
-static int
-spawn(void)
-{
-	flockfile(tty);
-	fputs("\e[J", tty);
-	fflush(tty);
-
-	pid_t pid;
-	if (!(pid = fork())) {
-		restore_tty();
-		funlockfile(tty);
-
-		xassert(!dup2(fileno(tty), STDIN_FILENO));
-
-		struct sigaction sa;
-		sigemptyset(&sa.sa_mask);
-
-		sa.sa_handler = SIG_DFL;
-
-		xassert(!sigaction(SIGCONT, &sa, NULL));
-		xassert(!sigaction(SIGWINCH, &sa, NULL));
-		xassert(!sigaction(SIGINT, &sa, NULL));
-		xassert(!sigaction(SIGTERM, &sa, NULL));
-		xassert(!sigaction(SIGQUIT, &sa, NULL));
-		xassert(!sigaction(SIGPIPE, &sa, NULL));
-
-		xassert(!pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL));
-		return 0;
-	}
-
-	int rc;
-	for (;;) {
-		int status;
-		if (waitpid(pid, &status, 0) < 0) {
-			rc = -1;
-			break;
-		}
-
-		rc = WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status) ? 1 : -1;
-		break;
-	}
-
-	setup_tty();
-	funlockfile(tty);
-
-	return rc;
 }
 
 static FILE *
@@ -3709,61 +3290,68 @@ open_visual_search(void)
 	fputc('\n', stream);
 
 	fprintf(stream,
-			"# SYNTAX\n"
-			"# ======\n"
-			"#\n"
-			"# FIRST-LINE ::= QUERY\n"
-			"# QUERY ::= { [KEY]...[<][>][!][=][VALUE] } ...\n"
-			"# VALUE ::= ' WORDS... '\n"
-			"# VALUE ::= \" WORD... \"\n"
-			"# VALUE ::= WORD\n"
-			"# KEY ::= {\n"
+"# SYNTAX\n"
+"# ======\n"
+"#\n"
+"# FIRST-LINE ::= QUERY\n"
+"# QUERY ::= { [KEY]...[<][>][!][=][VALUE] }...\n"
+"# VALUE ::= ' WORD... '\n"
+"# VALUE ::= \" WORD... \"\n"
+"# VALUE ::= WORD\n"
+"# KEY ::= {\n"
 			);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
 		char const *value = cur.f ? get_metadata(cur.p, cur.f, i) : NULL;
-		fprintf(stream, "#   %c=%-*s%s\n",
+		fprintf(stream, "#  %c%c=%-*s%s\n",
+				METADATA_IN_URL & (UINT64_C(1) << i) ? '+' : ' ',
 				METADATA_LETTERS[i],
 				value && *value ? (int)sizeof METADATA_NAMES[i] : 0,
 				METADATA_NAMES[i],
 				value ? value : "");
 	}
 	fprintf(stream,
-			"# }\n"
-			"#\n"
-			"# If a VALUE is omitted it is taken from the currently playing track.\n"
-			"#\n"
-			"# If a KEY is omitted it defaults to all possible keys.\n"
-			"# When multiple KEYs are present they are ORed.\n"
-			"#\n"
-			"# <, > Perform pairwise integer comparsion. Ignore every non-digit.\n"
-			"#\n"
-			"# !    Negate.\n"
-			"#\n"
-			"# =    Allow equality or perform regular expression match over strings (default).\n"
-			"#\n"
-			"# EXAMPLES\n"
-			"# =======\n"
-			"#\n"
-			"# MP3s from albums and tracks containing \"House\" with contribution from \"DJ Bob\" and \"Alice?number?\" from year 2000:\n"
-			"#   o'mp3' House y2000 '^dj BOB$' ^Alice[0-9]+$\n"
-			"#\n"
-			"# \"DJ Alice\"'s tracks in period:\n"
-			"#   axf\"DJ Alice\" y>='1970.03 14' y<1970-12\n"
-			"#\n"
-			"# Albums and tracks beginning with \"March\":\n"
-			"#   aA^March\n"
-			"#\n"
-			"# All versions of this track:\n"
-			"#   a t\n"
-			"#\n"
-			"# Tracks from this album:\n"
-			"#   A T V\n"
-			"#\n"
-			"# Tracks from this year:\n"
-			"#   y\n"
-			"#\n"
-			"# Favorite tracks:\n"
-			"#   p=fav\n"
+"# }\n"
+"#\n"
+"# If a KEY is omitted it defaults to all possible keys.\n"
+"# When multiple KEYs are present clause matches when any of them is\n"
+"# matching.\n"
+"#\n"
+"# If a VALUE is omitted it is taken from the currently playing file.\n"
+"# These values are shown above.\n"
+"#\n"
+"# VALUE is matched caseless unless it contains uppercase letter.\n"
+"#\n"
+"# When file has no tags KEYs marked with '+' match VALUE is against URL.\n"
+"#\n"
+"# <, > Perform pairwise integer comparsion. Ignore every non-digit.\n"
+"#\n"
+"# !    Negate.\n"
+"#\n"
+"# =    Allow equality or perform regular expression match over strings (default).\n"
+"#\n"
+"# EXAMPLES\n"
+"# ========\n"
+"#\n"
+"# MP3s from albums and tracks containing \"House\" with contribution from \"DJ Bob\" and \"Alice?number?\" from year 2000:\n"
+"#   o'mp3' House y2000 '^dj BOB$' ^Alice[0-9]+$\n"
+"#\n"
+"# \"DJ Alice\"'s tracks in period:\n"
+"#   axf\"DJ Alice\" y>='1970.03 14' y<1970-12\n"
+"#\n"
+"# Albums and tracks beginning with \"March\":\n"
+"#   aA^March\n"
+"#\n"
+"# All versions of this track:\n"
+"#   a t\n"
+"#\n"
+"# Tracks from this album:\n"
+"#   A T V\n"
+"#\n"
+"# Tracks from this year:\n"
+"#   y\n"
+"#\n"
+"# Favorite tracks:\n"
+"#   p=fav\n"
 			);
 
 	fclose(stream);
@@ -3772,7 +3360,7 @@ open_visual_search(void)
 	if (!rc) {
 		char const *editor = getenv("EDITOR");
 		execlp(editor, editor, "--", tmpname, NULL);
-		_exit(127);
+		_exit(EXIT_FAILURE);
 	} else if (0 < rc) {
 		stream = fopen(tmpname, "re");
 
@@ -3814,28 +3402,11 @@ open_visual_search(void)
 				free(line);
 
 			search_file(search_history[0]);
+			notify_event(EVENT_FILE_CHANGED);
 		}
 	}
 
 	unlink(tmpname);
-}
-
-static void
-use_number(int64_t *pnumber)
-{
-	if (has_number)
-		*pnumber = cur_number;
-	else
-		cur_number = *pnumber;
-}
-
-static unsigned char
-toggle(atomic_uchar *obj, char const *msg)
-{
-	unsigned char yes = !atomic_fetch_xor_explicit(obj, 1, memory_order_relaxed);
-	if (msg)
-		fprintf(tty, "%s: \e[%s\e[m"LF, msg, yes ? "1;32mYes" : "31mNo");
-	return yes;
 }
 
 static void
@@ -3844,6 +3415,7 @@ pause_player(int pause)
 	atomic_store_lax(&paused, pause);
 	if (!pause)
 		do_wakeup(&wakeup_source, &wakeup_sink);
+	notify_event(EVENT_STATE_CHANGED);
 }
 
 static struct timespec
@@ -3856,57 +3428,83 @@ get_file_mtim(PlaylistFile pf)
 }
 
 static void
-do_cmd(char c, int human)
+play_or_select_file(File *f)
+{
+	if (live) {
+		play_file(f, AV_NOPTS_VALUE);
+	} else {
+		sel = f;
+		notify_event(EVENT_FILE_CHANGED);
+	}
+}
+
+static void
+do_key(int c)
 {
 	if ('0' <= c && c <= '9') {
-		cur_number = 10 * (has_number ? cur_number : 0) + (c - '0');
-		has_number = 1;
+		cur_number = 10 * ('0' == has_number ? cur_number : 0) + (c - '0');
+		has_number = '0';
+		notify_event(EVENT_STATE_CHANGED);
 		return;
 	}
 
-	int can_seek = human ? live : 1;
-
-	if (CONTROL('J') == c)
-		c = seek_cmd;
-
 	switch (c) {
-	case CONTROL('['):
-		/* Noop. */
+	case CONTROL('D'):
+		cur_number = (LINES - 2) / 2;
+		c = 'n';
 		break;
 
+	case CONTROL('U'):
+		cur_number = (LINES - 2) / 2;
+		c = 'p';
+		break;
+
+	case CONTROL('M'):
+		if (live)
+			c = seek_cmd;
+		break;
+	}
+
+	if ('0' != has_number && c != has_number)
+		has_number = '\0';
+
+	switch (c) {
 	case '*':
-		atomic_store_lax(&volume, -volume);
+		atomic_store_lax(&volume, has_number ? cur_number : -volume);
+		notify_event(EVENT_STATE_CHANGED);
 		break;
 
 	case '+':
 		atomic_store_lax(&volume, FFMIN(abs(volume) + 1, 100));
+		notify_event(EVENT_STATE_CHANGED);
 		break;
 
 	case '-':
 		atomic_store_lax(&volume, FFMAX(abs(volume) - 2, 0));
+		notify_event(EVENT_STATE_CHANGED);
 		break;
 
 	case 'S': /* Statistics. */
 		print_stat();
 		break;
 
-	case 'I':
-		if (!toggle(&auto_i, "Auto i"))
-			break;
-		/* FALLTHROUGH */
-	case 'i': /* Information. */
-		print_format();
-		print_file(atomic_load_lax(&in0.pf.f), 0);
-		break;
-
-	case 'm': /* Metadata. */
+	case 'M': /* Metadata. */
 		atomic_store_lax(&dump_in0, 1);
 		do_wakeup(&wakeup_source, NULL);
 		break;
 
-	case '&':
-	case '!':
-		toggle(&live, NULL);
+	case 'm':
+		show_messages();
+		break;
+
+	case CONTROL('I'):
+		/* TODO: Switch show information / currently playing tabs. */
+		break;
+
+	case 'v':
+		if (atomic_fetch_xor_explicit(&live, 1, memory_order_relaxed))
+			atomic_store_lax(&sel, atomic_load_lax(&in0.pf.f));
+		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 		break;
 
 	case 't': /* Tracks. */
@@ -3919,8 +3517,7 @@ do_cmd(char c, int human)
 	}
 		break;
 
-	case '/':
-	case '=':
+	case '/': /* Search. */
 		open_visual_search();
 		if (live) {
 			PlaylistFile cur = get_current_pf();
@@ -3932,9 +3529,11 @@ do_cmd(char c, int human)
 
 	case '|':
 		/* TODO: Plumb master playlist. */
+		break;
+
 	case 'e': /* Edit. */
 	{
-		if (live && 'e' == c) {
+		if (live) {
 			seek_player(1, SEEK_CUR);
 			break;
 		}
@@ -3952,7 +3551,7 @@ do_cmd(char c, int human)
 		if (!spawn()) {
 			char const *editor = getenv("EDITOR");
 			execlp(editor, editor, "--", tmpname, NULL);
-			_exit(127);
+			_exit(EXIT_FAILURE);
 		}
 
 		unlink(tmpname);
@@ -3961,122 +3560,126 @@ do_cmd(char c, int human)
 
 	case 'r': /* Random. */
 	{
-		seek_cmd = c;
-
-		if (!can_seek)
+		char old_seek_cmd = seek_cmd;
+		seek_cmd = 'r';
+		notify_event(EVENT_STATE_CHANGED);
+		if ('g' == old_seek_cmd)
 			break;
 
-		PlaylistFile pf = seek_playlist(&master, NULL, POS_RND, SEEK_SET);
-		play_file(pf.f, AV_NOPTS_VALUE);
+		PlaylistFile cur = get_current_pf();
+		PlaylistFile pf = seek_playlist(&master, &cur, POS_RND, SEEK_SET);
+		play_or_select_file(pf.f);
 	}
 		break;
 
 	case 's': /* Set. */
 	{
-		static int64_t s_number = 0;
-
-		use_number(&s_number);
-		if (can_seek) {
+		if (live) {
 			/* Stay close to file, even if it fails to play. */
-			if ('p' != seek_cmd && 'n' != seek_cmd)
+			if ('p' != seek_cmd && 'n' != seek_cmd) {
 				seek_cmd = 'n';
-		} else {
-			seek_cmd = c;
-			break;
+				notify_event(EVENT_STATE_CHANGED);
+			}
 		}
 
-		PlaylistFile pf = seek_playlist(&master, NULL, s_number, SEEK_SET);
-		play_file(pf.f, AV_NOPTS_VALUE);
+		if (!has_number)
+			cur_number = 0;
+
+		PlaylistFile pf = seek_playlist(&master, NULL, cur_number, SEEK_SET);
+		play_or_select_file(pf.f);
 	}
 		break;
 
 	case 'n': /* Next. */
+	case KEY_DOWN:
 	case 'N':
 	case 'p': /* Previous. */
+	case KEY_UP:
 	{
-		static int64_t n_number = 1;
+		char old_seek_cmd = seek_cmd;
+		int dir = 'n' == c || KEY_DOWN == c ? 1 : -1;
+		seek_cmd = 0 < dir ? 'n' : 'p';
+		notify_event(EVENT_STATE_CHANGED);
+		if (!has_number)
+			cur_number = 1;
 
-		use_number(&n_number);
-		seek_cmd = c;
-
-		if (!can_seek)
+		if ('g' == old_seek_cmd)
 			break;
 
-		PlaylistFile pf = seek_playlist(&master, NULL, 'n' == c ? n_number : -n_number, SEEK_CUR);
-		play_file(pf.f, AV_NOPTS_VALUE);
+		PlaylistFile cur = get_current_pf();
+		PlaylistFile pf = seek_playlist(&master, &cur, dir * cur_number, SEEK_CUR);
+		play_or_select_file(pf.f);
 	}
 		break;
 
 	case 'g': /* Go to. */
+	case KEY_HOME:
 	{
-		static int64_t g_number = 0;
+		seek_cmd = 'g';
+		notify_event(EVENT_STATE_CHANGED);
 
-		use_number(&g_number);
-		seek_cmd = c;
+		if (!has_number)
+			cur_number = 0;
 
-		if (!can_seek)
-			break;
-
-		seek_player(g_number / 100 * 60 /* min */ + g_number % 100 /* sec */, SEEK_SET);
+		if (live) {
+			seek_player(cur_number / 100 * 60 /* min */ + cur_number % 100 /* sec */, SEEK_SET);
+		} else {
+			sel = seek_playlist(&master, NULL, 0, SEEK_SET).f;
+			notify_event(EVENT_FILE_CHANGED);
+		}
 	}
 		break;
 
 	case 'G': /* GO TO. */
+	case KEY_END:
 	{
-		static int64_t G_number = 100 * 3 / 8;
+		if (!has_number)
+			cur_number = 100 * 3 / 8;
 
-		use_number(&G_number);
-
-		seek_player(atomic_load_lax(&cur_duration) * G_number / 100, SEEK_SET);
+		if (live) {
+			seek_player(atomic_load_lax(&cur_duration) * cur_number / 100, SEEK_SET);
+		} else {
+			sel = seek_playlist(&master, NULL, 0, SEEK_END).f;
+			notify_event(EVENT_FILE_CHANGED);
+		}
 	}
 		break;
 
-	case 'h':
-	case 'l':
-		if (!can_seek)
-			break;
+	case 'H':
+	case KEY_SLEFT:
+	case 'L':
+	case KEY_SRIGHT:
+		scroll_x += 'H' == c || KEY_SLEFT == c ? -1 : 1;
+		notify_event(EVENT_FILE_CHANGED);
+		break;
 
-		seek_player(('h' == c ? -1 : 1) * 5, SEEK_CUR);
+	case 'h':
+	case KEY_LEFT:
+	case 'l':
+	case KEY_RIGHT:
+		seek_player(('h' == c || KEY_LEFT == c ? -1 : 1) * 5, SEEK_CUR);
 		break;
 
 	case 'j':
 	case 'k':
-		if (!can_seek)
-			break;
-
-		seek_player(('j' == c ? -1 : 1) * FFMAX(atomic_load_lax(&cur_duration) / 16, +5), SEEK_CUR);
-		break;
-
-	case 'W':
-		if (!toggle(&auto_w, "Auto w")) {
-			fputs("\e[J", tty);
-			break;
+		if (live) {
+			seek_player(('j' == c ? -1 : 1) * FFMAX(atomic_load_lax(&cur_duration) / 16, +5), SEEK_CUR);
+		} else {
+			PlaylistFile cur = get_current_pf();
+			sel = seek_playlist(&master, &cur, 'j' == c ? 1 : -1, SEEK_CUR).f;
+			notify_event(EVENT_FILE_CHANGED);
 		}
-		/* FALLTHROUGH */
-	case 'w': /* Where. */
-		print_around(get_current_pf());
 		break;
 
 	case '.':
 	case '>':
-		if (!can_seek)
-			break;
-
 		pause_player('.' == c);
 		break;
 
 	case 'c': /* Continue. */
 	case ' ':
-		if (!can_seek)
-			break;
-
 		pause_player(!paused);
 		break;
-
-	case 'Z': /* Zzz. */
-	case 'Q':
-	case 'q':
-		exit(EXIT_SUCCESS);
 
 	case 'a': /* After. */
 	case 'b': /* Before. */
@@ -4096,12 +3699,28 @@ do_cmd(char c, int human)
 		break;
 
 	case '?':
+	case KEY_F(1):
 		if (!spawn()) {
 			execlp("man", "man", "muck.1", NULL);
 			print_strerror("Could not open manual page");
-			_exit(127);
+			_exit(EXIT_FAILURE);
 		}
 		break;
+
+	case CONTROL('L'):
+		clear();
+		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
+		break;
+
+	case CONTROL('M'):
+		play_file(get_current_pf().f, AV_NOPTS_VALUE);
+		break;
+
+	case 'Z': /* Zzz. */
+	case 'Q':
+	case 'q':
+	case KEY_F(10):
+		exit(EXIT_SUCCESS);
 
 	default:
 	{
@@ -4120,8 +3739,7 @@ do_cmd(char c, int human)
 			    fchdir(playlist->dirfd) < 0)
 			{
 				print_error("Could not change working directory");
-				fflush(tty);
-				_exit(127);
+				_exit(EXIT_FAILURE);
 			}
 
 			if (F_FILE == f->a.type)
@@ -4141,28 +3759,31 @@ do_cmd(char c, int human)
 			execl(exe, exe, pf.f->a.url, NULL);
 			print_error("No binding for '%c'", c);
 
-			_exit(127);
+			_exit(EXIT_FAILURE);
 		}
 
 		struct timespec mtim_after = get_file_mtim(pf);
 
-		if (memcmp(&mtim_before, &mtim_after, sizeof mtim_before)) {
-			fprintf(tty, "Reloading changed file..."CR);
-			fflush(tty);
+		if (memcmp(&mtim_before, &mtim_after, sizeof mtim_before))
 			play_file(pf.f, atomic_load_lax(&cur_pts));
-		}
 	}
+		break;
+
+	case KEY_FOCUS_IN:
+	case KEY_FOCUS_OUT:
+		atomic_store_lax(&focused, KEY_FOCUS_IN == c);
+		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 		break;
 	}
 
-	has_number = 0;
+	has_number = c;
 }
 
 static void
-do_cmd_str(char const *s, int human)
+do_keys(char const *s)
 {
 	while (*s)
-		do_cmd(*s++, human);
+		do_key(*s++);
 }
 
 static void
@@ -4173,33 +3794,437 @@ log_cb(void *ctx, int level, const char *format, va_list ap)
 	if (av_log_get_level() < level)
 		return;
 
-	flockfile(tty);
-	if (print_clear) {
-		fputs("\e[", tty);
-		fputc(print_clear, tty);
-		print_clear = '\0';
+	flockfile(fmsg);
+	if (level <= AV_LOG_ERROR)
+		fputs("\033[1;31m", fmsg);
+	vfprintf(fmsg, format, ap);
+	if (level <= AV_LOG_ERROR)
+		fputs("\033[m", fmsg);
+	funlockfile(fmsg);
+}
+
+static void
+draw_cursor(void)
+{
+	move(sel_y, sel_x);
+}
+
+static void
+update_title(File const *f)
+{
+	fputs("\033]0;", tty);
+	if (f && f->metadata[M_title]) {
+		/* Note that metadata is free from control characters. */
+		fputs(f->a.url + f->metadata[M_title], tty);
+		if (f->metadata[M_version])
+			fprintf(tty, " (%s)", f->a.url + f->metadata[M_version]);
+	} else if (f) {
+		fputs(f->a.url, tty);
+	} else {
+		fputs("muck", tty);
+	}
+	fputc('\a', tty);
+}
+
+static void
+draw_files(void)
+{
+	typedef struct {
+		char mod;
+		int width;
+		union {
+			enum Metadata m;
+			enum MetadataX mx;
+		};
+	} ColumnDef;
+
+	ColumnDef defs[2 * MX_NB];
+
+	/* Parse columns specification. */
+	int stars = 0;
+	int nc = 0;
+	int totw = 0;
+
+	if (scroll_x < 0)
+		scroll_x = 0;
+
+	ColumnDef *c = defs;
+	for (char const *s = column_spec; *s;) {
+		char mod = '\0';
+		if ('*' <= *s && *s <= '/')
+			mod = *s++;
+		int iscol = !mod || '*' == mod;
+
+		if (!iscol && COLS < totw)
+			break;
+
+		char *end;
+		int n = strtol(s, &end, 10);
+
+		char const *p;
+		if (!(p = memchr(METADATA_LETTERS, *end, sizeof METADATA_LETTERS)))
+			break;
+		enum MetadataX mx = p - METADATA_LETTERS;
+
+		if (s == end) {
+			if (MX_index == mx && master.child_filter_count[0])
+				n = ceil(log(master.child_filter_count[0]) / log(10));
+			else
+				n = METADATA_COLUMN_WIDTHS[mx];
+		}
+
+		c->mod = mod;
+		c->width = n + 1 /* Padding SP between columns. */;
+		c->mx = mx;
+
+		stars += '*' == mod;
+		if (iscol)
+			totw += c->width;
+
+		s = end + 1;
+
+		if (iscol && ++nc <= scroll_x) {
+			c = defs;
+			totw = 0;
+			stars = 0;
+			continue;
+		}
+
+		if ((&defs)[1] <= ++c)
+			break;
 	}
 
-	if (level <= AV_LOG_ERROR)
-		fputs("\e[1;31m", tty);
-	vfprintf(tty, format, ap);
-	if (level <= AV_LOG_ERROR)
-		fputs("\e[m", tty);
-	funlockfile(tty);
+	if (nc < scroll_x)
+		scroll_x = nc;
+
+	ColumnDef *endc = c;
+
+	/* Expand flexible columns. */
+	for (c = defs; c < endc && 0 < stars; ++c)
+		if ('*' == c->mod) {
+			c->mod = '\0';
+			int n = (COLS - totw) / stars--;
+			if (0 < n) {
+				totw += n;
+				c->width += n;
+			}
+		}
+
+	/* Scroll to make current file visible. */
+	PlaylistFile start = seek_playlist(&master, NULL, 0, SEEK_SET);
+	PlaylistFile end = seek_playlist(&master, NULL, 0, SEEK_END);
+
+	int win_lines = LINES - 2;
+
+	File const *playing = atomic_load_lax(&in0.pf.f);
+	PlaylistFile cur = get_current_pf();
+	PlaylistFile pos = cur;
+	int seen_top = 0;
+	int dist = 0;
+	int scrolloff = 5;
+	for (;;) {
+		if (pos.f == start.f)
+			break;
+		seen_top |= pos.f == top.f;
+		if ((seen_top && scrolloff <= dist) || win_lines - scrolloff - 1 <= dist)
+			break;
+		pos = seek_playlist(&master, &pos, -1, SEEK_CUR);
+		++dist;
+	}
+	if (top.f) {
+		int dir = get_file_index(top) < get_file_index(pos) ? 1 : -1;
+		int scroll = 0;
+		while (top.f != pos.f && abs(scroll) <= LINES) {
+			top = seek_playlist(&master, &top, dir, SEEK_CUR);
+			scroll += dir;
+		}
+
+		if (scroll && abs(scroll) <= LINES) {
+			scrollok(stdscr, TRUE);
+			scrl(scroll);
+			scrollok(stdscr, FALSE);
+		}
+	}
+	top = pos;
+
+	/* Draw header. */
+	move(0, 0);
+	attr_set(A_REVERSE, 0, NULL);
+	for (c = defs; c < endc; ++c) {
+		if (c->mod)
+			continue;
+
+		char const *name = METADATA_NAMES[c->m];
+		int i = 0;
+
+		for (; name[i] && i + 1 < c->width; ++i) {
+			char t;
+			switch (name[i]) {
+			case '_':
+				t = ' ';
+				break;
+
+			default:
+				t = name[i] - 'a' + 'A';
+				break;
+			}
+			addch(t);
+		}
+
+		for (; i < c->width; ++i)
+			addch(' ');
+	}
+	for (int curx = getcurx(stdscr); curx < COLS; ++curx)
+		addch(' ');
+
+	/* Draw lines. */
+	sel_y = 0, sel_x = 0;
+
+	int line = 1;
+	for (;;) {
+		if (win_lines < line)
+			break;
+		if (!pos.f)
+			break;
+
+		if (pos.f == cur.f)
+			sel_y = line;
+
+		move(line, 0);
+
+		attr_t attrs = A_NORMAL;
+		attrs |= pos.f == cur.f && !atomic_load_lax(&live) ? A_REVERSE : 0;
+		attrs |= pos.f == playing ? A_BOLD : 0;
+		attr_set(attrs, 0, NULL);
+
+		if (!pos.f->metadata[M_title]) {
+			char const *url = pos.f->a.url;
+			if (F_URL != pos.f->a.type) {
+				char const *p = strrchr(url, '/');
+				if (p && p[1])
+					url = p + 1;
+			}
+			addstr(url);
+			for (int curx = getcurx(stdscr); curx < COLS; ++curx)
+				addch(' ');
+		} else {
+			int x = 0;
+			for (c = defs; c < endc; ++c) {
+				char const *s = get_metadata(pos.p, pos.f, c->mx);
+				if (!c->mod) {
+					if (x) {
+						int curx = getcurx(stdscr);
+						if (x - 1 < curx) {
+							move(line, x - 1);
+							addch(' ');
+						} else {
+							for (; curx < x; ++curx)
+								addch(' ');
+						}
+					}
+
+					x += c->width;
+				}
+
+				if (s) {
+					switch (c->mod) {
+					case ' ':
+						addch(' ');
+						break;
+
+					case ',':
+						addch(';');
+						break;
+
+					case '+':
+						switch (c->m) {
+						case M_featured_artist:
+						case M_album_featured_artist:
+							addstr(" (ft. ");
+							break;
+
+						default:
+							addstr(" (");
+							break;
+						}
+						break;
+
+					case '-':
+						addstr(" - ");
+						break;
+
+					case '/':
+						addstr(" / ");
+						break;
+					}
+					if (c->m == M_title)
+						sel_x = getcurx(stdscr);
+					addstr(s);
+					switch (c->mod) {
+					case '+':
+						addstr(")");
+						break;
+					}
+				}
+			}
+
+			for (int curx = getcurx(stdscr); curx < COLS; ++curx)
+				addch(' ');
+		}
+
+		++line;
+		if (pos.f == end.f)
+			break;
+		pos = seek_playlist(&master, &pos, 1, SEEK_CUR);
+	}
+
+	attr_set(A_NORMAL, 0, NULL);
+	for (; line <= win_lines; ++line) {
+		move(line, 0);
+		addch('~');
+		clrtoeol();
+	}
+
+#if 0
+	fprintf(tty, "%s -> %s"LF,
+			source_info.buf[birdlock_rd_acquire(&source_info.lock)],
+			sink_info.buf[birdlock_rd_acquire(&sink_info.lock)]);
+#endif
+	update_title(playing);
+}
+
+static void
+draw_progress(void)
+{
+	int64_t clock = atomic_load_lax(&cur_pts);
+	int64_t duration = atomic_load_lax(&cur_duration);
+
+#if 0
+	if (unlikely(AV_LOG_DEBUG <= av_log_get_level())) {
+		uint16_t len = atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head);
+		fprintf(tty, " buf:%"PRId64"kB low:%"PRId64"kB usr:%"PRId64"kB max:%"PRId64"kB pkt:%d",
+				atomic_load_lax(&buffer_bytes) / 1024,
+				atomic_load_lax(&buffer_low) / 1024,
+				atomic_load_lax(&buffer_bytes_max) / 1024,
+				len ? atomic_load_lax(&buffer_bytes) * (UINT16_MAX + 1) / len / 1024 : -1,
+				len);
+	}
+#endif
+
+	int y = LINES - 1;
+
+	move(y, 0);
+
+	attr_set(atomic_load_lax(&live) ? A_REVERSE : A_NORMAL, 0, NULL);
+	printw("%4"PRId64, cur_number);
+	addch(seek_cmd);
+	addch(atomic_load_lax(&paused) ? '.' : '>');
+
+	attr_set(A_NORMAL, 0, NULL);
+	printw(
+			"%3"PRId64":%02u"
+			" / "
+			"%3"PRId64":%02u"
+			" (%3u%%)"
+			" [Track: %u/%u]"
+			" [Vol: %3d%%]",
+			clock / 60, (unsigned)(clock % 60),
+			duration / 60, (unsigned)(duration % 60),
+			duration ? (unsigned)(clock * 100 / duration) : 0,
+			atomic_load_lax(&cur_track) + 1,
+			atomic_load_lax(&in0.nb_audios),
+			atomic_load_lax(&volume));
+
+	addstr(" [");
+	int x = getcurx(stdscr);
+	clrtoeol();
+
+	int l = duration ? clock * (COLS - 1 - x) / duration : 0;
+	for (int i = 0; i < l - 1; ++i)
+		addch('=');
+	if (l)
+		addch('>');
+	move(y, COLS - 1);
+	addch(']');
+}
+
+static void
+handle_sigwinch(int sig)
+{
+	(void)sig;
+
+	struct winsize w;
+	if (!ioctl(fileno(tty), TIOCGWINSZ, &w)) {
+		resize_term(w.ws_row, w.ws_col);
+		do_key(CONTROL('L'));
+	}
+}
+
+static void
+handle_sigcont(int sig)
+{
+	(void)sig;
+	endwin();
+	refresh();
+}
+
+static void
+handle_sigexit(int sig)
+{
+	(void)sig;
+	exit(EXIT_SUCCESS);
+}
+
+static void
+handle_signotify(int sig)
+{
+	(void)sig;
+	enum Event got_events = atomic_exchange_lax(&pending_events, 0);
+
+	if (EVENT_EOF_REACHED & got_events) {
+		int old_live = live;
+		live = 1;
+		do_key(CONTROL('M'));
+		live = old_live;
+	}
+
+	if ((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events) {
+		if (EVENT_FILE_CHANGED & got_events)
+			draw_files();
+
+		if ((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events)
+			draw_progress();
+
+		draw_cursor();
+		refresh();
+	}
 }
 
 int
 main(int argc, char **argv)
 {
+	setlocale(LC_ALL, "");
+
 	if (!(tty = fopen(ctermid(NULL), "w+e"))) {
 		fprintf(stderr, "Could not connect to TTY\n");
 		return EXIT_FAILURE;
 	}
 
-	atexit(do_cleanup);
+	{
+		snprintf(msg_path, sizeof msg_path,
+				"%s/muck.txt",
+				getenv("XDG_RUNTIME_DIR"));
+		if (!(fmsg = fopen(msg_path, "ae"))) {
+			fprintf(stderr, "Could not open messages file\n");
+			return EXIT_FAILURE;
+		}
+	}
 
-	save_tty();
-	setup_tty();
+	atexit(bye);
+
+	main_thread = pthread_self();
+
+	xassert(0 <= regcomp(&reg_ucase, "\\p{Lu}", REG_NOSUB));
 
 	/* Setup signals. */
 	{
@@ -4224,6 +4249,9 @@ main(int argc, char **argv)
 
 		sa.sa_handler = SIG_IGN;
 		xassert(!sigaction(SIGPIPE, &sa, NULL));
+
+		sa.sa_handler = handle_signotify;
+		xassert(!sigaction(SIGRTMIN, &sa, NULL));
 	}
 
 	/* Setup FFmpeg. */
@@ -4279,13 +4307,13 @@ main(int argc, char **argv)
 
 	/* Setup ended, can load files now. */
 	char const *startup_cmd = NULL;
-	for (int c; 0 <= (c = getopt(argc, argv, "q:x:a:c:f:n:m:wd"));)
+	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:n:m:s:d"));)
 		switch (c) {
 		case 'q':
 			search_history[0] = strdup(optarg);
 			break;
 
-		case 'x':
+		case 'e':
 			startup_cmd = optarg;
 			break;
 
@@ -4309,8 +4337,8 @@ main(int argc, char **argv)
 			buffer_bytes_max = strtoll(optarg, NULL, 10) * 1024;
 			break;
 
-		case 'w':
-			writable = 1;
+		case 's':
+			column_spec = optarg;
 			break;
 
 		case 'd':
@@ -4379,34 +4407,43 @@ main(int argc, char **argv)
 		search_file(search_history[0]);
 
 	if (startup_cmd)
-		do_cmd_str(startup_cmd, 0);
+		do_keys(startup_cmd);
 	else
 		play_file(seek_playlist(&master, NULL, 0, SEEK_SET).f, AV_NOPTS_VALUE);
 
 	/* TUI event loop. */
 	{
 		pthread_setname_np(pthread_self(), "muck/tty");
+		newterm(NULL, stderr, tty);
+		start_color();
+		use_default_colors();
+		cbreak();
+		noecho();
+		nonl();
+		nodelay(stdscr, TRUE);
+		keypad(stdscr, TRUE);
+		meta(stdscr, TRUE);
+		curs_set(0);
 
-		struct pollfd fds[1];
-		fds[0].fd = fileno(tty);
-		fds[0].events = POLLIN;
+		fprintf(tty, "\033[?1004h"); /* Send FocusIn/FocusOut events. */
+
+		define_key("\033[I", KEY_FOCUS_IN);
+		define_key("\033[O", KEY_FOCUS_OUT);
+
+		struct pollfd pollfd;
+		pollfd.fd = fileno(tty);
+		pollfd.events = POLLIN;
 
 		sigset_t sigmask;
 		xassert(!sigemptyset(&sigmask));
 
 		for (;;) {
-			print_progress(1);
-			fflush(tty);
-
-			int rc = ppoll(fds, ARRAY_SIZE(fds), NULL, &sigmask);
+			int rc = ppoll(&pollfd, 1, NULL, &sigmask);
 			if (rc <= 0)
 				continue;
 
-			char c;
-			if (1 != read(fds[!(POLLIN & fds[0].revents)].fd, &c, 1))
-				break;
-
-			do_cmd(c, 1);
+			for (int key; ERR != (key = getch());)
+				do_key(key);
 		}
 	}
 }

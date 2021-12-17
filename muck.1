@@ -1,4 +1,5 @@
-.TH MUCK "1" "August 2021"
+.TH MUCK "1" "December 2021"
+.schar \[u2026] ...
 .SH NAME
 muck \- music player
 .
@@ -66,14 +67,11 @@ If not set, a suitable location is chosen.
 Execute initial search query.
 .
 .TP
-.BI \-x\  COMMAND
+.BI \-e\  COMMAND
 Execute
 .I COMMAND
-at startup.
-.IP
-Default:
-.B s
-(begin playing from the first file).
+at startup. Default:
+.BR s " (begin playing from the first file)."
 .
 .TP
 .BI \-a\  FILTERGRAPH
@@ -89,95 +87,104 @@ to disable.
 .
 .TP
 .BI \-c\  CODEC
-Output codec.
-.IP
-Default:
-.B pcm
-(fake codec that uses sample format of input).
+Set output codec. Default:
+.BR pcm " (fake codec that uses sample format of input)."
 .
 .TP
 .BI \-f\  FORMAT
-Output format.
-.IP
-Default:
+Set output format. Default:
 .BR alsa .
 .
 .TP
 .BI \-n\  FILENAME
-Output filename.
-.IP
-Default:
-(none).
+Set output filename. Default: (none).
 .
 .TP
 .BI \-m\  SIZE
-Maximum demuxer buffer size in kB.
-.IP
-Default:
+Set maximum demuxer buffer size in kB. Default:
 .BR 4096 .
 .
 .TP
-.BI \-w
-Allow writing
-.B user.last_play
-extended attributes.
+.BI \-s\  SPEC
+Specify column layout. Default:
+.BR iy30a,x25A+Fd*20Tn*40t+f+vgbIB*LCoh*z .
+.IP
+.IR SPEC " := [ [" MODIFIER "] [" WIDTH "] " KEY " ]..."
+.IP
+.TS
+tab(|)[allbox];
+ll.
+\fIMODIFIER\fR|Description
+\[u2423]|Join with " ".
+\fB*\fR|Make column flexible. \fIWIDTH\fR specifies minimum width.
+\fB+\fR|Wrap in " (\[u2026])".
+\fB,\fR|Join with ";".
+\fB-\fR|Join with " - ".
+\fB/\fR|Join with " / ".
+.TE
+.IP
+.I WIDTH
+specifies required column width. When omitted a default value is used. As a
+special case, 0 means key should not be columnized but join it to the previous
+column.
+.IP
+.I KEY
+is a single letter metadata key. The complete list of recognized keys is
+available in search mode.
 .
+.SH KEYBINDINGS
+.SS "Live mode"
 .TP
-.B \-d
-Print debug information. Be very verbose when given twice.
-.
-.SH USAGE
-.SS Keybindings
-.TP
-.BR 0-9 ,\ \-
+.BR 0-9
 Set
-.IR N x
+.IR N
 for next command.
 .
 .TP
-.BR p ,\  N
+.BR p ,\  N ,\  Up
 Seek to
-.IR Nn "-th (default: 1)"
-previous file.
+.IR N "th (default: 1) previous file."
 .
 .TP
-.BR n
+.BR n ,\  Down
 Seek to
-.IR Nn -th
-next file. (Default seek command at startup.)
+.IR N "th (default: 1) next file."
+.
+.TP
+.BR g ,\  Home
+Seek to
+.IR N "=MMSS (default: 0)."
+.IP
+For example
+.BR 100g ,\  60g
+both seek to 1 minute.
+.
+.TP
+.BR G ,\  End
+Seek to
+.IR N "% (default: 1/\[*F]\[S2]\[~=]3/8=37.5%)"
+in the file.
 .
 .TP
 .BR s
 Seek to
-.IR Ns "\-th (default: 0) file."
+.IR N "th (default: 0) file."
 .
 .TP
 .BR r
-Seek to a random file.
+Seek to a random file (other than the currently playing file).
 .
 .TP
 .BR Return
 Seek again.
 .
 .TP
-.BR g
-Seek to
-.IR Ng " (default: 0)"
-seconds.
-.
-.TP
-.BR G
-Seek to
-.IR NG "% (default: 1/\[*F]\[S2]\[~=]3/8=37.5%)"
-in the file.
-.
-.TP
-.BR h ,\  l
-Seek by 5 seconds.
-.
-.TP
 .BR j ,\  k
 Seek by 5% but at least 5 seconds.
+.
+.TP
+.BR h ,\  l ,\  Left ,\  Right
+Seek by 5 seconds.
 .
 .TP
 .BR .
@@ -192,32 +199,18 @@ Unpause playback.
 Toggle pause playback.
 .
 .TP
-.B i
-Print information about currently playing file.
-.
-.TP
-.BR w here
-Print files around currently playing file.
-.
-.TP
-.BR I ,\  W
-Toggle automatic
-.BR i " or " w
-whenever seeking in playlist.
-.
-.TP
-.B m
-Print detailed metadata information about currently playing.
+.B M
+Dump detailed metadata information about currently playing file into messages.
 .
 .TP
 .BR / ,\  =
-Search.
-.IP
-Detailed manual is part of the search screen.
+Search. Further help is part of the search screen.
 .
 .TP
 .BR + ,\ \-
-Change volume property of
+Change
+.B volume
+property of
 .B volume
 filter by +1% and -2% respectively.
 .
@@ -228,16 +221,36 @@ Toggle mute. Uses
 filter.
 .
 .TP
+.BR H ,\  L ,\  Shift+Left ,\  Shift+Right
+Scroll file list horizontally.
+.
+.TP
 .B S
 Print statistics.
 .
 .TP
-.BR Z ,\  Q ,\  q
+.B v
+Switch between
+.B live
+and
+.B visual
+modes. Live mode is the default.
+.
+.TP
+.B m
+Show messages.
+.
+.TP
+.BR Ctrl+L
+Refresh screen.
+.
+.TP
+.BR Z ,\  Q ,\  q ,\  F10
 Quit.
 .
 .TP
-.BR Escape
-Ignore.
+.BR ? ,\  F1
+Open manual.
 .
 .TP
 (other letter)
@@ -246,6 +259,23 @@ Execute
 .IP
 .RB $ MUCK_ *
 environment variables are set, based on the currently playing file.
+.
+.SS "Visual mode"
+.TP
+.BR p ,\  N ,\  Up ,\  n ,\  Down ,\  g ,\  Home ,\  G ,\  End ,\  s ,\  r ,\  / ,\  =
+Same as in live mode but do not start playing.
+.
+.TP
+.BR Return
+Start playing current file.
+.
+.TP
+.BR j ,\  k
+Move selection.
+.
+.TP
+(other)
+Same as in live mode.
 .
 .SH ENVIRONMENT
 .TP
@@ -285,7 +315,6 @@ PLAYLIST
 .SH "SEE ALSO"
 .BR ffmpeg (1)
 .BR ffplay (1)
-.BR realpath (1)
 .
 .SH AUTHORS
 Written by zsugabubus.
