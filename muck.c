@@ -704,6 +704,7 @@ read_playlist(Playlist *playlist, int fd)
 
 	char buf[UINT16_MAX];
 	uint16_t buf_size = 0;
+	char *line = buf;
 
 	int is_m3u = 0;
 
@@ -715,12 +716,15 @@ read_playlist(Playlist *playlist, int fd)
 	for (;;) {
 		col = NULL;
 
-		char *line = buf, *line_end;
-		while (!(line_end = memchr(buf, '\n', buf_size))) {
+		char *line_end;
+		while (!(line_end = memchr(line, '\n', buf_size))) {
 			if (sizeof buf - 1 == buf_size) {
 				error_msg = "Too long line";
 				goto out;
 			}
+
+			memmove(buf, line, buf_size);
+			line = buf;
 
 			ssize_t len = read(fd, buf + buf_size, (sizeof buf - 1) - buf_size);
 			if (len < 0) {
@@ -894,8 +898,8 @@ read_playlist(Playlist *playlist, int fd)
 		}
 
 		++line_end; /* Skip LF. */
-		buf_size -= line_end - buf;
-		memmove(buf, line_end, buf_size);
+		buf_size -= line_end - line;
+		line = line_end;
 		++lnum;
 	}
 
