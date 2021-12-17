@@ -40,6 +40,7 @@ ffmpeg_dep = declare_dependency(
 		dependency('x11'),
 		dependency('zlib'),
 		dependency('ncursesw'),
+		dependency('libpcre2-posix'),
 
 	],
 )

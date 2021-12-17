@@ -5,7 +5,7 @@
 #include <ncurses.h>
 #include <poll.h>
 #include <pthread.h>
-#include <regex.h>
+#include <pcre2posix.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -297,6 +297,26 @@ typedef struct {
 	int fd; /**< -1 for F_URL. */
 	unsigned nb_audios;
 } Input;
+
+typedef struct FileTask FileTask;
+
+typedef struct {
+	FileTask *task;
+	PlaylistFile cur;
+	size_t count;
+	pthread_t thread;
+	void const *arg;
+} FileTaskWorker;
+
+struct FileTask {
+	pthread_mutex_t mutex;
+	PlaylistFile cur;
+	int64_t remaining;
+	int64_t batch_size;
+	uint8_t nworkers;
+	void (*routine)(FileTaskWorker *, void const *);
+	FileTaskWorker workers[64];
+};
 
 static pthread_t main_thread;
 static pthread_t source_thread, sink_thread;
@@ -2156,31 +2176,28 @@ print_stat(void)
 	}
 }
 
-static uint64_t
-match_file(Playlist *parent, AnyFile *a, uint8_t filter_index, Clause const *clauses, size_t nb_clauses)
+typedef struct {
+	Clause const *clauses;
+	size_t nb_clauses;
+	uint8_t filter_index;
+} MatchFileArg;
+
+static void
+match_file(PlaylistFile pf, MatchFileArg const *arg)
 {
-	if (F_FILE < a->type) {
-		uint64_t count = 0;
-		Playlist *playlist = (void *)a;
-
-		for_each_file()
-			count += match_file(playlist, a, filter_index, clauses, nb_clauses);
-
-		return (playlist->child_filter_count[filter_index] = count);
-	}
-
-	File *f = (void *)a;
+	assert(pf.f->a.type == F_FILE);
+	assert(arg->filter_index);
 
 	uint8_t stack[CLAUSE_LEVEL_MAX];
 	uint8_t level = 0;
 	stack[level] = 1;
 
-	if (!nb_clauses)
+	if (!arg->nb_clauses)
 		stack[level] = 1;
-	else for (size_t i = 0; i < nb_clauses; ++i) {
-		Clause const *clause = &clauses[i];
+	else for (size_t i = 0; i < arg->nb_clauses; ++i) {
+		Clause const *clause = &arg->clauses[i];
 		if (level < clause->level)
-		stack[clause->level] = stack[level];
+			stack[clause->level] = stack[level];
 		level = clause->level;
 
 		/* Expression does not affect result. */
@@ -2191,16 +2208,16 @@ match_file(Playlist *parent, AnyFile *a, uint8_t filter_index, Clause const *cla
 			enum MetadataX m = __builtin_ctz(mxs);
 			mxs ^= UINT64_C(1) << m;
 
-			char const *value = get_metadata(parent, f, m);
+			char const *value = get_metadata(pf.p, pf.f, m);
 
 			/* Fallback to the URL if metadata is missing for this
 			 * file. This way user can avoid nasty queries in a new
 			 * playlist. */
 			if (!value &&
 			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
-			    !f->metadata[M_duration])
+			    !pf.f->metadata[M_duration])
 			{
-				value = f->a.url;
+				value = pf.f->a.url;
 			} else if (!value) {
 				if (!clause->not)
 					goto no_match;
@@ -2259,14 +2276,13 @@ match_file(Playlist *parent, AnyFile *a, uint8_t filter_index, Clause const *cla
 		/* Continue with next clause. */
 	}
 
-	if (!stack[0]) {
-		f->a.filter_mask &= ~(UINT32_C(1) << filter_index);
-		return 0;
+	uint32_t filter_mask = UINT32_C(1) << arg->filter_index;
+	if (stack[0]) {
+		pf.f->a.filter_mask |= filter_mask;
+		atomic_fetch_add_lax(&pf.p->child_filter_count[arg->filter_index], 1);
+	} else {
+		pf.f->a.filter_mask &= ~filter_mask;
 	}
-
-	f->a.filter_mask |= UINT32_C(1) << filter_index;
-
-	return 1;
 }
 
 static PlaylistFile
@@ -2294,15 +2310,17 @@ get_playlist_end(Playlist const *playlist, int dir)
 	return get_playlist_start(playlist, -dir);
 }
 
-#define POS_RND INT64_MIN
+
+static int64_t const POS_RND = INT64_MIN;
 
 /* TODO: In playlists named ".queue", current file is always destroyed after
  * seeking. */
 /* TODO: Append current entry to playlist named ".history". */
 static PlaylistFile
-seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, int whence)
+seek_playlist_raw(Playlist const *root_playlist, uint8_t filter_index, PlaylistFile const *cur, int64_t pos, int whence)
 {
-	uint64_t max = playlist->child_filter_count[cur_filter[live]];
+	Playlist const *playlist = root_playlist;
+	uint64_t max = playlist->child_filter_count[filter_index];
 	if (!max)
 		return (PlaylistFile){};
 
@@ -2328,7 +2346,6 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 		dir = -1;
 	}
 
-
 	AnyFile const *a;
 	if (SEEK_CUR == whence && cur->f) {
 		playlist = cur->p;
@@ -2339,11 +2356,12 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 	}
 
 	for (;;) {
+	check:
 		if (F_FILE < a->type) {
 			Playlist const *p = (void *)a;
 			uint64_t n;
 
-			n = p->child_filter_count[cur_filter[live]];
+			n = p->child_filter_count[filter_index];
 			if (n < (uint64_t)pos || !p->files_size) {
 				/* Step over. */
 				pos -= n;
@@ -2356,33 +2374,132 @@ seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, in
 		}
 
 		if (a->type <= F_FILE &&
-		    ((UINT32_C(1) << cur_filter[live]) & a->filter_mask))
+		    ((UINT32_C(1) << filter_index) & a->filter_mask))
 		{
 			if (!pos)
 				break;
 			--pos;
 		}
 
-		/* Step out. */
 		while (playlist && get_playlist_end(playlist, dir) == a) {
+			/* Wrap around. */
+			if (root_playlist == playlist) {
+				a = get_playlist_start(playlist, dir);
+				goto check;
+			}
+
 			a = &playlist->a;
 			playlist = ((Playlist *)a)->parent;
 		}
 
-		/* Wrap around. */
-		if (!playlist) {
-			playlist = (void *)a;
-			a = get_playlist_start(playlist, dir);
-		} else if (0 <= dir) {
+		/* Step over. */
+		if (0 <= dir)
 			PTR_INC(a, get_file_size(a->type));
-		} else {
+		else
 			PTR_INC(a, -get_file_size(a->prev_type));
-		}
 	}
 
 	assert(a->type <= F_FILE);
 	assert(F_FILE < playlist->a.type);
 	return (PlaylistFile){ (Playlist *)playlist, (File *)a, };
+}
+
+static PlaylistFile
+seek_playlist(Playlist const *playlist, PlaylistFile const *cur, int64_t pos, int whence)
+{
+	return seek_playlist_raw(playlist, cur_filter[live], cur, pos, whence);
+}
+
+static void *
+task_worker(void *arg)
+{
+	FileTaskWorker *worker = arg;
+
+#if HAVE_PTHREAD_SETNAME_NP
+	char name[16];
+	snprintf(name, sizeof name, "muck/worker%zu", (size_t)(worker - worker->task->workers));
+	pthread_setname_np(pthread_self(), name);
+#endif
+
+	worker->task->routine(worker, worker->arg);
+
+	return NULL;
+}
+
+static void
+for_each_file_par(void (*routine)(FileTaskWorker *, void const *), void const *arg)
+{
+	static const int64_t BATCH_SIZE_MIN = 16;
+	static const int64_t BATCH_SIZE_MAX = 256;
+
+	static long ncpus;
+	if (!ncpus) {
+		ncpus = sysconf(_SC_NPROCESSORS_ONLN);
+		ncpus = FFMAX(1, FFMIN(ncpus, ARRAY_SIZE(((FileTask *)0)->workers)));
+	}
+
+	FileTask task;
+
+	xassert(0 <= pthread_mutex_init(&task.mutex, NULL));
+
+	task.remaining = master.child_filter_count[0];
+	if (1 < ncpus)
+		task.batch_size = FFMAX(BATCH_SIZE_MIN, FFMIN(task.remaining / ncpus, BATCH_SIZE_MAX));
+	else
+		task.batch_size = task.remaining;
+	task.cur = seek_playlist_raw(&master, 0, NULL, 0, SEEK_SET);
+
+	task.nworkers = (task.remaining + task.batch_size - 1) / task.batch_size;
+	task.nworkers = FFMIN(task.nworkers, ncpus);
+
+	task.routine = routine;
+	FileTaskWorker *worker = task.workers;
+	for (;;) {
+		*worker = (FileTaskWorker){
+			.task = &task,
+			.arg = arg,
+		};
+
+		if (worker < &task.workers[task.nworkers - 1] &&
+		    0 <= pthread_create(&worker->thread, NULL, task_worker, worker))
+		{
+			++worker;
+		} else {
+			task.routine(worker, arg);
+			break;
+		}
+	}
+
+	while (task.workers <= --worker)
+		pthread_join(worker->thread, NULL);
+
+	xassert(0 <= pthread_mutex_destroy(&task.mutex));
+}
+
+static int
+worker_get(FileTaskWorker *worker, PlaylistFile *cur)
+{
+	if (!worker->count) {
+		FileTask *task = worker->task;
+		xassert(0 <= pthread_mutex_lock(&task->mutex));
+
+		int64_t n = FFMIN(task->batch_size, task->remaining);
+		worker->cur = task->cur;
+		worker->count = n;
+		task->remaining -= n;
+		task->cur = seek_playlist_raw(&master, 0, &task->cur, n, SEEK_CUR);
+
+		xassert(0 <= pthread_mutex_unlock(&task->mutex));
+
+		if (!worker->count)
+			return 0;
+	}
+
+	*cur = worker->cur;
+	--worker->count;
+	worker->cur = seek_playlist_raw(&master, 0, &worker->cur, 1, SEEK_CUR);
+
+	return 1;
 }
 
 static int
@@ -2440,6 +2557,32 @@ show_messages(void)
 		execlp(pager, pager, "-rf", "-+ceEFX", "--", msg_path, NULL);
 		_exit(EXIT_FAILURE);
 	}
+}
+
+/* Reset match counts. */
+static void
+match_file_pre(Playlist *playlist, uint8_t filter_index)
+{
+	playlist->child_filter_count[filter_index] = 0;
+	for_each_playlist(child, playlist)
+		match_file_pre(child, filter_index);
+}
+
+/* Propagate match counts upwards. */
+static void
+match_file_post(Playlist *playlist, uint8_t filter_index)
+{
+	for_each_playlist(child, playlist) {
+		match_file_post(child, filter_index);
+		playlist->child_filter_count[filter_index] += child->child_filter_count[filter_index];
+	}
+}
+
+static void
+match_file_worker(FileTaskWorker *worker, void const *arg)
+{
+	for (PlaylistFile pf; worker_get(worker, &pf);)
+		match_file(pf, arg);
 }
 
 /**
@@ -2648,8 +2791,18 @@ append:;
 		goto append;
 	}
 
-	uint8_t filter_index = 0;
-	match_file(NULL, &master.a, filter_index, clauses, clause - clauses);
+	/* TODO: Cache filters. */
+	cur_filter[live] = 1 + live;
+
+	uint32_t filter_index = cur_filter[live];
+
+	match_file_pre(&master, filter_index);
+	for_each_file_par(match_file_worker, &(MatchFileArg const){
+		.clauses = clauses,
+		.nb_clauses = clause - clauses,
+		.filter_index = filter_index,
+	});
+	match_file_post(&master, filter_index);
 
 	struct timespec finish;
 	xassert(!clock_gettime(CLOCK_MONOTONIC, &finish));
@@ -2659,7 +2812,7 @@ append:;
 		((finish.tv_sec - start.tv_sec) * NS_PER_SEC +
 		 (finish.tv_nsec - start.tv_nsec)) /
 		(double)NS_PER_SEC;
-	fprintf(fmsg, "Search finished in %.3f s: ", elapsed);
+	fprintf(fmsg, "Search finished in %.3f s\n", elapsed);
 
 cleanup:
 	if (error_msg) {
