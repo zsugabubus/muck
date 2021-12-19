@@ -260,6 +260,7 @@ enum KeyOp {
 	OP_LT = 1 << 1,
 	OP_EQ = 1 << 2,
 	OP_GT = 1 << 3,
+	OP_ISSET = 1 << 4,
 };
 
 /* NOTE: ZARY (NULL) is a special 0-ary expression that always evalutes to
@@ -306,17 +307,6 @@ enum {
 	S_FILTERED,
 	S_TOTAL,
 };
-
-typedef struct {
-	uint64_t nb_files[2];
-	uint64_t nb_playlists[2];
-	int64_t duration[2];
-	uint64_t nb_unscanned[2];
-	uint64_t nb_untagged[2];
-
-	int64_t play_duration;
-	uint64_t play_count;
-} Statistics;
 
 typedef struct {
 	AVFormatContext *format_ctx;
@@ -369,8 +359,6 @@ static char const *ofilename = NULL;
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
 static unsigned _Atomic cur_track;
-static int64_t _Atomic play_duration;
-static uint64_t _Atomic play_count;
 static atomic_uchar ALIGNED_ATOMIC dump_in0;
 static PlaylistFile top;
 static File *sel;
@@ -2021,176 +2009,6 @@ get_metadata(Playlist const *playlist, File const *f, enum MetadataX m)
 	}
 }
 
-static int
-collect_stat(Statistics *s, AnyFile *a)
-{
-	if (F_FILE < a->type) {
-		Playlist *playlist = (void *)a;
-
-		s->nb_playlists[S_TOTAL] += &master != playlist;
-
-		int any = 0;
-		for_each_file()
-			any |= collect_stat(s, a);
-
-		s->nb_playlists[S_FILTERED] += any && &master != playlist;
-		return any;
-	}
-
-	File *f = (void *)a;
-
-	uint64_t duration = f->metadata[M_duration]
-		? strtoull(a->url + f->metadata[M_duration], NULL, 10)
-		: 0;
-
-#define COLLECT(S_type) \
-	s->duration[S_type] += duration; \
-	s->nb_unscanned[S_type] += !f->metadata[M_duration]; \
-	s->nb_untagged[S_type] += !f->metadata[M_title];
-
-	COLLECT(S_TOTAL);
-
-	if (!((UINT32_C(1) << cur_filter[1]) & a->filter_mask))
-		return 0;
-
-	COLLECT(S_FILTERED);
-
-#undef COLLECT
-
-	return 1;
-}
-
-static Statistics
-calc_stat(void)
-{
-	Statistics s = {
-		.nb_files = {
-			[S_TOTAL] = master.child_filter_count[0],
-			[S_FILTERED] = master.child_filter_count[cur_filter[1]],
-		},
-		.play_duration = atomic_load_lax(&play_duration) / AV_TIME_BASE,
-		.play_count = atomic_load_lax(&play_count),
-	};
-	collect_stat(&s, &master.a);
-	return s;
-}
-
-static void
-print_stat(void)
-{
-	enum { TABLE_COLUMN_WIDTH = 20, };
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-	static const struct Descriptor {
-		char str[9];
-		char type;
-		uint8_t offset;
-		uint8_t count;
-	} DESCRIPTION[] = {
-		{ "", 'T', },
-		{ "", 'T', },
-
-		{ "LIBRARY",   's', },
-		{ "FILTERED",  'h', },
-		{ "TOTAL",     'H', },
-
-		{ "Files",     'N', offsetof(Statistics, nb_files),     2, },
-		{ "Playlists", 'N', offsetof(Statistics, nb_playlists), 2, },
-		{ "Duration",  'D', offsetof(Statistics, duration),     2, },
-		{ "Unscanned", 'N', offsetof(Statistics, nb_unscanned), 2, },
-		{ "Untagged",  'N', offsetof(Statistics, nb_untagged),  2, },
-
-		{ "SESSION",   'S', },
-
-		{ "Played",    'D', offsetof(Statistics, play_duration), },
-		{ "Listened",  'N', offsetof(Statistics, play_count), },
-	};
-#pragma GCC diagnostic pop
-
-	Statistics s = calc_stat();
-
-	int lines = 0;
-	for (struct Descriptor const *d = DESCRIPTION;
-	     d < (&DESCRIPTION)[1];
-	     ++d)
-	{
-		switch (d->type | ' ') {
-		case 't': /* Unformatted text. */
-			fputs(d->str, fmsg);
-			break;
-
-		case 's': /* Section. */
-			fprintf(fmsg, "\033[1m%-*.*s\033[m",
-					(int)ARRAY_SIZE(d->str) + 3,
-					(int)ARRAY_SIZE(d->str),
-					d->str);
-			break;
-
-		case 'h': /* Table header. */
-			fprintf(fmsg, "%*.*s",
-					TABLE_COLUMN_WIDTH,
-					(int)ARRAY_SIZE(d->str),
-					d->str);
-			break;
-
-		default:
-			fprintf(fmsg, " %-*.*s :",
-					(int)ARRAY_SIZE(d->str),
-					(int)ARRAY_SIZE(d->str),
-					d->str);
-			break;
-		}
-
-		unsigned elem_size = 0;
-		switch (d->type | ' ') {
-		case 'd': /* Duration. */
-			elem_size = sizeof(int64_t);
-			break;
-
-		case 'n': /* Number. */
-			elem_size = sizeof(uint64_t);
-			break;
-		}
-
-		if (elem_size) {
-			unsigned count = 0;
-			do {
-				void *data = (char *)&s + d->offset + elem_size * count;
-				switch (d->type | ' ') {
-				case 'd':
-				{
-					int64_t seconds = *(int64_t *)data;
-					int64_t days = seconds / (3600 * 24);
-					if (days)
-						fprintf(fmsg, "%*"PRIu64" days",
-								TABLE_COLUMN_WIDTH - 14,
-								days);
-					else
-						fprintf(fmsg, "%*c", 6 + 1 + 5, 0);
-					fprintf(fmsg, " %02u:%02u:%02u",
-							(unsigned)(seconds / 3600 % 24),
-							(unsigned)(seconds / 60 % 60),
-							(unsigned)(seconds % 60));
-				}
-					break;
-
-				case 'n':
-					fprintf(fmsg, "%*"PRIu64,
-							TABLE_COLUMN_WIDTH,
-							*(uint64_t *)data);
-					break;
-				}
-			} while (++count < d->count);
-		}
-
-		if (!(' ' & d->type)) {
-			fputc('\n', fmsg);
-			++lines;
-		}
-	}
-}
-
 static char const *
 expr_strtou64(char const *s, uint64_t *ret)
 {
@@ -2239,6 +2057,7 @@ expr_eval(Expr const *expr, PlaylistFile pf)
 			 * file. This way user can avoid nasty queries in a new
 			 * playlist. */
 			if (!value &&
+			    !(OP_ISSET & expr->kv.op) &&
 			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
 			    !pf.f->metadata[M_duration])
 				value = pf.f->a.url;
@@ -2347,22 +2166,27 @@ expr_parse_kv(ExprParserContext *parser)
 	if (!expr->kv.keys)
 		expr->kv.keys = (UINT64_C(1) << MX_NB) - 1;
 
+	if ('?' == *parser->ptr) {
+		++parser->ptr;
+		expr->kv.op |= OP_ISSET;
+	}
+
 	switch (*parser->ptr) {
 	case '~':
 		++parser->ptr;
 		/* FALLTHROUGH */
 	default:
-		expr->kv.op = OP_REG;
+		expr->kv.op |= OP_REG;
 		break;
 
 	case '<':
 		++parser->ptr;
-		expr->kv.op = OP_LT;
+		expr->kv.op |= OP_LT;
 		goto may_eq;
 
 	case '>':
 		++parser->ptr;
-		expr->kv.op = OP_GT;
+		expr->kv.op |= OP_GT;
 		goto may_eq;
 
 	may_eq:
@@ -3531,8 +3355,6 @@ sink_worker(void *arg)
 		frame->pkt_dts = out_dts;
 		frame->pkt_duration = frame->nb_samples *
 			out.audio->time_base.den / frame->sample_rate / out.audio->time_base.num;
-		atomic_store_lax(&play_duration, play_duration +
-				frame->nb_samples * AV_TIME_BASE / frame->sample_rate);
 
 		rc = av_buffersrc_add_frame_flags(buffer_ctx, frame, AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
 		if (unlikely(rc < 0))
@@ -3704,7 +3526,7 @@ open_visual_search(void)
 "# ======\n"
 "#\n"
 "# FIRST-LINE := EXPR\n"
-"# EXPR := [KEY]... [ { \"<\" | \">\" }[ \"=\" ] | \"~\" ] [VALUE]\n"
+"# EXPR := [KEY]... [ \"?\" ] [ { \"<\" | \">\" }[ \"=\" ] | \"~\" ] [VALUE]\n"
 "# EXPR := EXPR \"&\" EXPR | EXPR EXPR\n"
 "# EXPR := EXPR \"|\" EXPR\n"
 "# EXPR := \"!\" EXPR\n"
@@ -3768,10 +3590,15 @@ open_visual_search(void)
 "#   Both match songs named 'Ear' but only the first one matches 'Heart'.\n"
 "#\n"
 "# If file has no tags, KEYs marked with \"+\" match VALUE against URL.\n"
+"# This behavior can be avoided by \"?\".\n"
 "#   Example:\n"
 "#     a~jimmy t~sunshine\n"
 "#   For unscanned files both 'jimmy' and 'sunshine' are searched in URL,\n"
 "#   thus it will match appropriately named files, e.g. 'Jimmy - Sunshine.mp3'.\n"
+"#     a?jimmy\n"
+"#   May return nothing.\n"
+"#     n?.\n"
+"#   Use \".\" (match any) after \"?\" to test whether key is set.\n"
 "#\n"
 "# Between expressions \"!\", \"&\", \"|\" can be used to express\n"
 "# negation, and and or operations, respectively. \"&\" is the default so it\n"
@@ -3912,10 +3739,6 @@ do_key(int c)
 		notify_event(EVENT_STATE_CHANGED);
 		break;
 
-	case 'S': /* Statistics. */
-		print_stat();
-		break;
-
 	case 'M': /* Metadata. */
 		atomic_store_lax(&dump_in0, 1);
 		do_wakeup(&wakeup_source, NULL);
@@ -3957,6 +3780,7 @@ do_key(int c)
 
 	case '|':
 		/* TODO: Plumb master playlist. */
+		plumb_file(&master.a, cur_filter[live], stdout);
 		break;
 
 	case 'e': /* Edit. */
