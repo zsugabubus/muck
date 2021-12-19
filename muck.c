@@ -248,23 +248,59 @@ typedef struct {
 	File *f;
 } PlaylistFile;
 
-enum { CLAUSE_LEVEL_MAX = 10, };
+enum ExprType {
+	T_NEG,
+	T_AND,
+	T_OR,
+	T_KV,
+};
 
-/* FIXME: ( ... ) is fucked. Use [!][& |]() and implement correct stack. */
-typedef struct {
-	uint64_t mxs;
-	uint8_t level; /* How deep we are inside of "("s. */
-	unsigned or: 1,
-	         neg: 1;
-	unsigned lt: 1,
-	         eq: 1,
-	         gt: 1,
-	         not: 1;
+enum KeyOp {
+	OP_REG = 1 << 0,
+	OP_LT = 1 << 1,
+	OP_EQ = 1 << 2,
+	OP_GT = 1 << 3,
+};
+
+/* NOTE: ZARY (NULL) is a special 0-ary expression that always evalutes to
+ * true. */
+
+typedef struct Expr Expr;
+struct Expr {
+	enum ExprType type;
 	union {
-		regex_t reg;
-		char str[64];
+		/* Unary operator. */
+		struct {
+			Expr *expr;
+		} un;
+
+		/* Binary operator. */
+		struct {
+			Expr *lhs;
+			Expr *rhs;
+		} bi;
+
+		/* Key-value expression. */
+		struct {
+			uint64_t keys;
+			enum KeyOp op;
+			union {
+				regex_t reg;
+				struct {
+					uint8_t nnums;
+					uint64_t nums[5];
+				};
+			};
+		} kv;
 	};
-} Clause;
+};
+
+typedef struct {
+	char const *ptr;
+	char error_buf[256];
+	char const *error_msg;
+	PlaylistFile cur;
+} ExprParserContext;
 
 enum {
 	S_FILTERED,
@@ -1910,27 +1946,6 @@ fail:
 	return -1;
 }
 
-static char const *
-parse_number(char const *s, uint64_t *ret)
-{
-	while (*s && !('0' <= *s && *s <= '9'))
-		++s;
-	if (!*s)
-		return NULL;
-
-	uint64_t n = 0;
-	do
-		n = 10 * n + (*s++ - '0');
-	while ('0' <= *s && *s <= '9');
-
-	/* Units. */
-	if ('m' == *s)
-		n *= 60;
-
-	*ret = n;
-	return s;
-}
-
 static uint64_t
 get_file_index(PlaylistFile pf)
 {
@@ -2176,37 +2191,47 @@ print_stat(void)
 	}
 }
 
-typedef struct {
-	Clause const *clauses;
-	size_t nb_clauses;
-	uint8_t filter_index;
-} MatchFileArg;
-
-static void
-match_file(PlaylistFile pf, MatchFileArg const *arg)
+static char const *
+expr_strtou64(char const *s, uint64_t *ret)
 {
-	assert(pf.f->a.type == F_FILE);
-	assert(arg->filter_index);
+	while (*s && !('0' <= *s && *s <= '9'))
+		++s;
+	if (!*s)
+		return NULL;
 
-	uint8_t stack[CLAUSE_LEVEL_MAX];
-	uint8_t level = 0;
-	stack[level] = 1;
+	uint64_t n = 0;
+	do
+		n = 10 * n + (*s++ - '0');
+	while ('0' <= *s && *s <= '9');
 
-	if (!arg->nb_clauses)
-		stack[level] = 1;
-	else for (size_t i = 0; i < arg->nb_clauses; ++i) {
-		Clause const *clause = &arg->clauses[i];
-		if (level < clause->level)
-			stack[clause->level] = stack[level];
-		level = clause->level;
+	/* Units. */
+	if ('m' == *s)
+		n *= 60;
 
-		/* Expression does not affect result. */
-		if (stack[level] == clause->or)
-			continue;
+	*ret = n;
+	return s;
+}
 
-		for (uint64_t mxs = clause->mxs; mxs;) {
-			enum MetadataX m = __builtin_ctz(mxs);
-			mxs ^= UINT64_C(1) << m;
+static int
+expr_eval(Expr const *expr, PlaylistFile pf)
+{
+	if (!expr)
+		return 1;
+
+	switch (expr->type) {
+	case T_NEG:
+		return !expr_eval(expr->un.expr, pf);
+
+	case T_AND:
+		return expr_eval(expr->bi.lhs, pf) && expr_eval(expr->bi.rhs, pf);
+
+	case T_OR:
+		return expr_eval(expr->bi.lhs, pf) || expr_eval(expr->bi.rhs, pf);
+
+	case T_KV:
+		for (uint64_t keys = expr->kv.keys; keys;) {
+			enum MetadataX m = __builtin_ctz(keys);
+			keys ^= UINT64_C(1) << m;
 
 			char const *value = get_metadata(pf.p, pf.f, m);
 
@@ -2216,68 +2241,488 @@ match_file(PlaylistFile pf, MatchFileArg const *arg)
 			if (!value &&
 			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
 			    !pf.f->metadata[M_duration])
-			{
 				value = pf.f->a.url;
-			} else if (!value) {
-				if (!clause->not)
-					goto no_match;
-				else
-					goto matched;
-			}
+			else if (!value)
+				continue;
 
-			if (clause->lt | clause->gt) {
-				char const *s = clause->str;
+			if (OP_REG & expr->kv.op) {
+				if (REG_NOMATCH != regexec(&expr->kv.reg, value, 0, NULL, 0))
+					return 1;
+			} else {
 				char const *v = value;
 
-				for (;;) {
-					uint64_t sn, vn;
-					if (!(s = parse_number(s, &sn))) {
-						if (clause->not == clause->eq)
-							/* 2020-01-03 /y<2020-01 */
-							/* 2020-01-03 /y>2020-01 */
-							goto no_match;
-						else
-							/* 2020-01-03 /y<=2020-01 */
-							/* 2020-01-03 /y>=2020-01 */
-							/* 2020-01-03 /y=2020-01 */
-							goto matched;
-					}
+				for (uint8_t i = 0;;) {
+					if (expr->kv.nnums <= i)
+						return 1;
 
-					if (!(v = parse_number(v, &vn)) ||
-					    /* Decide on first difference. */
-					    (vn != sn &&
-					     (clause->lt != (vn < sn) ||
-					      clause->gt != (vn > sn))))
-					{
-						if (!clause->not)
-							goto no_match;
-						else
-							goto matched;
-					}
+					uint64_t vn;
+					if (!(v = expr_strtou64(v, &vn)))
+						break;
+
+					uint64_t n = expr->kv.nums[i++];
+					enum KeyOp rel = OP_LT << ((vn > n) - (vn < n) + 1);
+					if (rel & ~OP_EQ & expr->kv.op)
+						return 1;
+					if (rel & ((OP_LT | OP_EQ | OP_GT) ^ expr->kv.op))
+						break;
 				}
-			} else {
-				if (clause->not != (REG_NOMATCH == regexec(&clause->reg, value, 0, NULL, 0)))
-					goto no_match;
-				else
-					goto matched;
 			}
-
-		no_match:;
-			/* Continue with an alternative metadata. */
 		}
+		return 0;
 
-		/* Note that result can be written directly because clause->or
-		 * does not affect end result. */
-		if ((stack[level] = 0)) {
-		matched:;
-			stack[level] = 1;
-		}
+	default:
+		abort();
+	}
+}
 
-		/* Continue with next clause. */
+static void
+expr_free(Expr *expr)
+{
+	if (!expr)
+		return;
+
+	switch (expr->type) {
+	case T_NEG:
+		expr_free(expr->un.expr);
+		break;
+
+	case T_AND:
+	case T_OR:
+		expr_free(expr->bi.lhs);
+		expr_free(expr->bi.rhs);
+		break;
+
+	case T_KV:
+		if (OP_REG & expr->kv.op)
+			regfree(&expr->kv.reg);
+		break;
+
+	default:
+		abort();
 	}
 
+	free(expr);
+}
+
+static Expr *
+expr_new(enum ExprType type)
+{
+#define EXPR_sizeof(u) (offsetof(Expr, u) + sizeof(((Expr *)0)->u))
+
+	static size_t const EXPR_SZ[] = {
+		[T_NEG] = EXPR_sizeof(un),
+		[T_AND] = EXPR_sizeof(bi),
+		[T_OR]  = EXPR_sizeof(bi),
+		[T_KV]  = EXPR_sizeof(kv),
+	};
+
+#undef EXPR_sizeof
+
+	Expr *expr = calloc(1, EXPR_SZ[type]);
+	if (expr)
+		expr->type = type;
+	return expr;
+}
+
+static Expr *
+expr_parse_kv(ExprParserContext *parser)
+{
+	Expr *expr = expr_new(T_KV);
+
+	expr->kv.keys = 0;
+	while (('a' <= *parser->ptr && *parser->ptr <= 'z') ||
+	       ('A' <= *parser->ptr && *parser->ptr <= 'Z'))
+	{
+		char const *p;
+		if (!(p = memchr(METADATA_LETTERS, *parser->ptr, sizeof METADATA_LETTERS))) {
+			parser->error_msg = "Unknown key";
+			goto fail;
+		}
+		++parser->ptr;
+
+		enum MetadataX m = p - METADATA_LETTERS;
+		expr->kv.keys |= UINT64_C(1) << m;
+	}
+	/* Default to all keys. */
+	if (!expr->kv.keys)
+		expr->kv.keys = (UINT64_C(1) << MX_NB) - 1;
+
+	switch (*parser->ptr) {
+	case '~':
+		++parser->ptr;
+		/* FALLTHROUGH */
+	default:
+		expr->kv.op = OP_REG;
+		break;
+
+	case '<':
+		++parser->ptr;
+		expr->kv.op = OP_LT;
+		goto may_eq;
+
+	case '>':
+		++parser->ptr;
+		expr->kv.op = OP_GT;
+		goto may_eq;
+
+	may_eq:
+		if ('=' == *parser->ptr) {
+	case '=':
+			++parser->ptr;
+			expr->kv.op |= OP_EQ;
+		}
+		break;
+	}
+
+	char const *p = parser->ptr;
+
+	char buf[1 << 12];
+	size_t buf_size = 0;
+	char st = '"' == *p || '\'' == *p ? *p++ : '\0';
+
+	for (; '\\' == *p ? *++p : *p && (st ? st != *p : ' ' != *p && '|' != *p && ')' != *p); ++p) {
+		unsigned magic_sp = 0;
+		if (' ' == *p) {
+			unsigned escaped = 0;
+			for (size_t i = buf_size; 0 < i && '\\' == buf[--i];)
+				escaped ^= 1;
+			magic_sp = !escaped;
+		}
+
+		if (magic_sp) {
+			if (sizeof buf - 1 /* NUL */ - 6 < buf_size)
+				goto fail_too_long;
+			memcpy(buf + buf_size, "[._ -]+", 6);
+			buf_size += 6;
+		} else {
+			if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
+				goto fail_too_long;
+			buf[buf_size++] = *p;
+		}
+	}
+
+	if (!buf_size) {
+		PlaylistFile cur = parser->cur;
+		if (!cur.f) {
+			parser->error_msg = "No file is playing";
+			goto fail;
+		}
+
+		for (uint64_t mxs = expr->kv.keys; mxs;) {
+			enum MetadataX m = __builtin_ctz(mxs);
+			mxs ^= UINT64_C(1) << m;
+
+			char const *value = get_metadata(cur.p, cur.f, m);
+			if (!value)
+				value = "";
+			while (*value && ';' != *value) {
+				switch (*value) {
+				case '(': case ')':
+				case '{': case '}':
+				case '[': case ']':
+				case '?': case '*': case '+':
+				case '.':
+				case '|':
+				case '^': case '$':
+				case '\\':
+					if (sizeof buf - 1 /* NUL */ - 2 < buf_size)
+						goto fail_too_long;
+					buf[buf_size++] = '\\';
+					break;
+
+				default:
+					if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
+						goto fail_too_long;
+					break;
+				}
+
+				buf[buf_size++] = *value++;
+			}
+		}
+	}
+
+	buf[buf_size] = '\0';
+
+	if (OP_REG & expr->kv.op) {
+		int flags = REG_EXTENDED | REG_NOSUB;
+		if (REG_NOMATCH == regexec(&reg_ucase, buf, 0, NULL, 0))
+			flags |= REG_ICASE;
+
+		int rc = regcomp(&expr->kv.reg, buf, flags);
+		if (rc) {
+			/* regex_t is not valid and should not be freed. */
+			expr->kv.op = 0;
+			regerror(rc, &expr->kv.reg, parser->error_buf, sizeof parser->error_buf);
+			parser->error_msg = parser->error_buf;
+			goto fail;
+		}
+	} else {
+		char const *s = buf;
+		expr->kv.nnums = 0;
+		for (;;) {
+			if (ARRAY_SIZE(expr->kv.nums) <= expr->kv.nnums) {
+				parser->error_msg = "Too much numbers";
+				goto fail;
+			}
+
+			if (!(s = expr_strtou64(s, &expr->kv.nums[expr->kv.nnums])))
+				break;
+			++expr->kv.nnums;
+		}
+	}
+
+	if (*p && st)
+		++p;
+
+	parser->ptr = p;
+	return expr;
+
+fail_too_long:
+	parser->error_msg = "Too long";
+fail:
+	assert(parser->error_msg);
+	expr_free(expr);
+	return NULL;
+}
+
+static int
+expr_cost(Expr *expr)
+{
+	if (!expr)
+		return 0;
+
+	switch (expr->type) {
+	case T_NEG:
+		return 1 + expr_cost(expr->un.expr);
+
+	case T_AND:
+	case T_OR:
+		return 2 + expr_cost(expr->bi.lhs) + expr_cost(expr->bi.rhs);
+
+	case T_KV:
+		if (OP_REG & expr->kv.op)
+			return 1000 * __builtin_popcount(expr->kv.keys);
+		else
+			return 100;
+		break;
+
+	default:
+		abort();
+	}
+}
+
+static int
+expr_depends_key(Expr const *expr, enum MetadataX m)
+{
+	if (!expr)
+		return 0;
+
+	switch (expr->type) {
+	case T_NEG:
+		return expr_depends_key(expr->un.expr, m);
+
+	case T_AND:
+	case T_OR:
+		return expr_depends_key(expr->bi.lhs, m) || expr_depends_key(expr->bi.rhs, m);
+
+	case T_KV:
+		return !!(expr->kv.keys & (UINT64_C(1) << m));
+
+	default:
+		abort();
+	}
+}
+
+static void
+expr_optimize(Expr **pexpr)
+{
+	Expr *expr = *pexpr;
+	if (!expr)
+		return;
+
+	switch (expr->type) {
+	case T_NEG:
+		expr_optimize(&expr->un.expr);
+
+		/* Eliminate double negation. */
+		if (T_NEG == expr->un.expr->type) {
+			Expr **expr2 = &expr->un.expr->un.expr;
+			*pexpr = *expr2;
+			*expr2 = NULL;
+			expr_free(expr);
+		}
+
+		return;
+
+	case T_AND:
+	case T_OR:
+		expr_optimize(&expr->bi.lhs);
+		expr_optimize(&expr->bi.rhs);
+
+		/* X AND ZARY, ZARY AND X => X */
+		if (T_AND == expr->type) {
+			if (!expr->bi.lhs) {
+				*pexpr = expr->bi.rhs;
+				expr->bi.rhs = NULL;
+				expr_free(expr);
+				return;
+			} else if (!expr->bi.rhs) {
+				*pexpr = expr->bi.lhs;
+				expr->bi.lhs = NULL;
+				expr_free(expr);
+				return;
+			}
+		}
+		/* X OR ZARY, ZARY OR X => 1 */
+		else if (!expr->bi.lhs || !expr->bi.rhs) {
+			*pexpr = NULL;
+			expr_free(expr);
+			return;
+		}
+
+		/* Commutative => evaluate cheaper->expensive. */
+		if (expr->type == expr->bi.rhs->type) {
+			Expr **rlhs = &expr->bi.rhs->bi.lhs;
+			if (expr_cost(expr->bi.lhs) > expr_cost(*rlhs)) {
+				Expr *t = expr->bi.lhs;
+				expr->bi.lhs = *rlhs;
+				*rlhs = t;
+
+				/* Re-optimize after change. */
+				expr_optimize(&expr->bi.rhs);
+			}
+		} else if (expr_cost(expr->bi.lhs) > expr_cost(expr->bi.rhs)) {
+			Expr *t = expr->bi.lhs;
+			expr->bi.lhs = expr->bi.rhs;
+			expr->bi.rhs = t;
+		}
+
+		return;
+
+	case T_KV:
+		return;
+
+	default:
+		abort();
+	}
+}
+
+static Expr *
+expr_parse(ExprParserContext *parser)
+{
+	Expr *lhs = NULL, *rhs;
+
+	for (;;) {
+		rhs = NULL;
+		switch (*parser->ptr) {
+		case '\0':
+			return lhs;
+
+		case ' ':
+		case '\t':
+		case '\r':
+		case '\n':
+			++parser->ptr;
+			break;
+
+		case '!':
+		{
+			++parser->ptr;
+			rhs = expr_new(T_NEG);
+			if (!rhs)
+				goto fail_errno;
+			if (!(rhs->un.expr = expr_parse(parser)))
+				goto fail;
+		}
+			break;
+
+		case '&':
+		case '|':
+		{
+			if (!lhs) {
+				parser->error_msg = "Missing left-hand side expression";
+				goto fail;
+			}
+
+			rhs = expr_new('&' == *parser->ptr ? T_AND : T_OR);
+			if (!rhs)
+				goto fail_errno;
+			++parser->ptr;
+			if (!(rhs->bi.rhs = expr_parse(parser))) {
+				if (!parser->error_msg)
+					parser->error_msg = "Missing right-hand side expression";
+				goto fail;
+			}
+			rhs->bi.lhs = lhs;
+			lhs = NULL;
+		}
+			break;
+
+		case '(':
+			++parser->ptr;
+			if (!(rhs = expr_parse(parser)))
+				goto fail_unmatched;
+			while (')' != *parser->ptr) {
+				switch (*parser->ptr) {
+				case ' ':
+				case '\t':
+					++parser->ptr;
+					break;
+
+				default:
+				fail_unmatched:
+					if (!parser->error_msg)
+						parser->error_msg = "Unmatched (";
+					goto fail;
+				}
+			}
+			++parser->ptr;
+			break;
+
+		default:
+			if (!(rhs = expr_parse_kv(parser)))
+				goto fail;
+		}
+
+		if (!rhs) {
+			/* Noop. */
+		} else if (!lhs) {
+			lhs = rhs;
+			rhs = NULL;
+		} else {
+			/* Space operator: omitted &. */
+			Expr *expr = expr_new(T_AND);
+			if (!expr)
+				goto fail_errno;
+			expr->bi.lhs = lhs;
+			expr->bi.rhs = rhs;
+			lhs = expr;
+		}
+	}
+	abort();
+
+fail_errno:
+	parser->error_msg = strerror(errno);
+fail:
+	assert(parser->error_msg);
+	expr_free(lhs);
+	expr_free(rhs);
+	return NULL;
+}
+
+typedef struct {
+	Expr *query;
+	uint8_t filter_index;
+} MatchFileArg;
+
+static void
+match_file(PlaylistFile pf, MatchFileArg const *arg)
+{
+	assert(pf.f->a.type == F_FILE);
+	assert(arg->filter_index);
+
 	uint32_t filter_mask = UINT32_C(1) << arg->filter_index;
-	if (stack[0]) {
+	if (expr_eval(arg->query, pf)) {
 		pf.f->a.filter_mask |= filter_mask;
 		atomic_fetch_add_lax(&pf.p->child_filter_count[arg->filter_index], 1);
 	} else {
@@ -2585,211 +3030,49 @@ match_file_worker(FileTaskWorker *worker, void const *arg)
 		match_file(pf, arg);
 }
 
-/**
- * @param s "(" [LETTER[<][>][!][=]EXPR]... " | " ")"
- */
 static void
 search_file(char const *s)
 {
-	Clause clauses[M_NB], *clause = clauses;
-	char buf[1 << 12];
-
-	char const *orig = s;
-	char const *error_msg = NULL;
-	char const *p;
-
-	uint8_t level = 0;
-
 	struct timespec start;
 	xassert(!clock_gettime(CLOCK_MONOTONIC, &start));
 
-	File const *cur = atomic_load_lax(&in0.pf.f);
+	int old_live = live;
+	live = 1;
+	ExprParserContext parser = {
+		.ptr = s,
+		.cur = get_current_pf(),
+	};
+	live = old_live;
 
-	int has_playlist_clause = 0;
-
-append:;
-	int or = 0;
-	while (*s) {
-		switch (*s) {
-		case ' ':
-		case '\t':
-			++s;
-			continue;
-
-		case '(':
-			if (CLAUSE_LEVEL_MAX == level + 1) {
-				p = NULL;
-				error_msg = "Maximum nesting depth reached";
-				goto cleanup;
-			}
-			++s;
-			++level;
-			or = 0;
-			continue;
-
-		case ')':
-			if (!level) {
-				p = NULL;
-				error_msg = "Unmatched )";
-				goto cleanup;
-			}
-			++s;
-			--level;
-			or = 0;
-			continue;
-
-		case '|':
-			++s;
-			or = 1;
-			continue;
-
-		case '&':
-			++s;
-			or = 0;
-			continue;
-		}
-
-		clause->or = or;
-		clause->level = level;
-		clause->mxs = 0;
-		while (('a' <= *s && *s <= 'z') ||
-		       ('A' <= *s && *s <= 'Z'))
-		{
-			if (!(p = memchr(METADATA_LETTERS, *s, sizeof METADATA_LETTERS))) {
-				error_msg = "Unknown field specifier";
-				goto cleanup;
-			}
-			++s;
-
-			enum MetadataX m = p - METADATA_LETTERS;
-			clause->mxs |= UINT64_C(1) << m;
-
-			has_playlist_clause |= MX_playlist == m;
-		}
-
-		if (!clause->mxs)
-			clause->mxs = (UINT64_C(1) << MX_NB) - 1;
-
-		s += (clause->lt  = '<' == *s);
-		s += (clause->gt  = '>' == *s);
-		s += (clause->not = '!' == *s);
-		s += (clause->eq  = '=' == *s);
-
-		if ((clause->lt | clause->gt) && clause->not)
-			clause->lt ^= 1,
-			clause->gt ^= 1,
-			clause->eq ^= 1;
-		else if (!(clause->lt | clause->gt | clause->eq))
-			clause->eq = 1;
-
-		size_t buf_size = 0;
-		p = s;
-		char right = '"' == *p || '\'' == *p ? *p++ : '\0';
-
-		for (; '\\' == *p ? *++p : *p && (right ? right != *p : ' ' != *p && ')' != *p); ++p) {
-			unsigned special_space = 0;
-			if (' ' == *p) {
-				unsigned escaped = 0;
-				for (size_t i = buf_size; 0 < i && '\\' == buf[--i];)
-					escaped ^= 1;
-				special_space = !escaped;
-			}
-
-			if (special_space) {
-				if (sizeof buf - 1 /* NUL */ - 6 < buf_size)
-					goto fail_too_long;
-				memcpy(buf + buf_size, "[._ -]+", 6);
-				buf_size += 6;
-			} else {
-				if (sizeof buf - 1 /* NUL */ - 1 < buf_size) {
-				fail_too_long:
-					error_msg = "Too long";
-					goto cleanup;
-				}
-				buf[buf_size++] = *p;
-			}
-		}
-
-		/* No value. */
-		if (p == s) {
-			if (!cur) {
-				error_msg = "No file is playing";
-				goto cleanup;
-			}
-
-			for (uint64_t mxs = clause->mxs; mxs;) {
-				enum MetadataX m = __builtin_ctz(mxs);
-				mxs ^= UINT64_C(1) << m;
-
-				p = cur->metadata[m] ? cur->a.url + cur->metadata[m] : "";
-				while (*p && ';' != *p) {
-					switch (*p) {
-					case '(': case ')':
-					case '{': case '}':
-					case '[': case ']':
-					case '?': case '*': case '+':
-					case '.':
-					case '|':
-					case '^': case '$':
-					case '\\':
-						if (sizeof buf - 1 /* NUL */ - 2 < buf_size) {
-							p = NULL;
-							goto fail_too_long;
-						}
-						buf[buf_size++] = '\\';
-						break;
-
-					default:
-						if (sizeof buf - 1 /* NUL */ - 1 < buf_size) {
-							p = NULL;
-							goto fail_too_long;
-						}
-						break;
-					}
-
-					buf[buf_size++] = *p++;
-				}
-			}
-		}
-
-		buf[buf_size] = '\0';
-
-		if (clause->lt | clause->gt) {
-			if (sizeof clause->str < buf_size)
-				goto fail_too_long;
-
-			memcpy(clause->str, buf, buf_size);
-		} else {
-			int flags = REG_EXTENDED | REG_NOSUB;
-			if (REG_NOMATCH == regexec(&reg_ucase, buf, 0, NULL, 0))
-				flags |= REG_ICASE;
-
-			int rc = regcomp(&clause->reg, buf, flags);
-			if (rc) {
-				regerror(rc, &clause->reg, buf, sizeof buf);
-				error_msg = buf;
-				goto cleanup;
-			}
-		}
-		s = p;
-
-		if (*s && right)
-			++s;
-
-		++clause;
-		or = 0;
-	}
-	/* Let it be an error since (x=y) is not "( x=y )" but "( x='y)'". */
-	if (level) {
-		p = NULL;
-		error_msg = "Unclosed (";
-		goto cleanup;
+	Expr *query = expr_parse(&parser);
+	if (parser.error_msg) {
+	fail:
+		endwin();
+		/* TODO: Reopen visual search. */
+		fprintf(tty, "<string>:%zu: error: %s\n",
+				(size_t)(parser.ptr - s),
+				parser.error_msg);
+		fprintf(tty, "...%s\n", parser.ptr);
+		getchar();
+		refresh();
+		goto out;
 	}
 
-	if (!has_playlist_clause) {
-		s = "p=^[^-]";
-		goto append;
+	if (!expr_depends_key(query, MX_playlist)) {
+		parser.ptr = "p~^[^-]";
+
+		Expr *expr = expr_new(T_AND);
+		if (!expr)
+			goto out;
+		if (!(expr->bi.rhs = expr_parse(&parser))) {
+			expr_free(expr);
+			goto fail;
+		}
+		expr->bi.lhs = query;
+		query = expr;
 	}
+
+	expr_optimize(&query);
 
 	/* TODO: Cache filters. */
 	cur_filter[live] = 1 + live;
@@ -2798,8 +3081,7 @@ append:;
 
 	match_file_pre(&master, filter_index);
 	for_each_file_par(match_file_worker, &(MatchFileArg const){
-		.clauses = clauses,
-		.nb_clauses = clause - clauses,
+		.query = query,
 		.filter_index = filter_index,
 	});
 	match_file_post(&master, filter_index);
@@ -2814,24 +3096,8 @@ append:;
 		(double)NS_PER_SEC;
 	fprintf(fmsg, "Search finished in %.3f s\n", elapsed);
 
-cleanup:
-	if (error_msg) {
-		endwin();
-
-		fprintf(tty, "\033[2J\033[1;31mError: %s\033[m\n", error_msg);
-		fprintf(tty, "%s\n", orig);
-		fprintf(tty, "\033[%uG\033[1;31m^", (unsigned)(s - orig) + 1);
-		while (++s < p)
-			fputc('~', tty);
-		fputs("\033[m\n", tty);
-		getchar();
-
-		refresh();
-	}
-
-	while (clauses < clause--)
-		if (!(clause->lt | clause->gt))
-			regfree(&clause->reg);
+out:
+	expr_free(query);
 }
 
 static void
@@ -3418,7 +3684,7 @@ open_visual_search(void)
 			continue;
 
 		fputc(METADATA_LETTERS[i], stream);
-		fputc('=', stream);
+		fputc('~', stream);
 		fputc('\'', stream);
 		fputs(value, stream);
 		fputc('\'', stream);
@@ -3450,12 +3716,16 @@ open_visual_search(void)
 "# SYNTAX\n"
 "# ======\n"
 "#\n"
-"# FIRST-LINE ::= QUERY\n"
-"# QUERY ::= { [KEY]...[<][>][!][=][VALUE] }...\n"
-"# VALUE ::= ' WORD... '\n"
-"# VALUE ::= \" WORD... \"\n"
-"# VALUE ::= WORD\n"
-"# KEY ::= {\n"
+"# FIRST-LINE := EXPR\n"
+"# EXPR := [KEY]... [ { \"<\" | \">\" }[ \"=\" ] | \"~\" ] [VALUE]\n"
+"# EXPR := EXPR \"&\" EXPR | EXPR EXPR\n"
+"# EXPR := EXPR \"|\" EXPR\n"
+"# EXPR := \"!\" EXPR\n"
+"# VALUE := QUOTED | WORD\n"
+"# QUOTED := \"'\" { all characters - \"'\" }... \"'\"\n"
+"# QUOTED := '\"' { all characters - '\"' }... '\"'\n"
+"# WORD := [ all characters - \"'\", '\"', \" \", \"|\", \")\" ] { all characters - \" \", \"|\", \")\" }...\n"
+"# KEY := {\n"
 			);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
 		char const *value = cur.f ? get_metadata(cur.p, cur.f, i) : NULL;
@@ -3469,46 +3739,60 @@ open_visual_search(void)
 	fprintf(stream,
 "# }\n"
 "#\n"
-"# If a KEY is omitted it defaults to all possible keys.\n"
-"# When multiple KEYs are present clause matches when any of them is\n"
-"# matching.\n"
+"# If KEY is omitted it defaults to all possible keys.\n"
+"#   Example:\n"
+"#     ~love.*bugs\n"
+"#     'all star'\n"
+"#   Searches artist, title, url, codec, comment...\n"
 "#\n"
-"# If a VALUE is omitted it is taken from the currently playing file.\n"
-"# These values are shown above.\n"
+"# When multiple KEYs are specified it matches when any of them is\n"
+"# matching.\n"
+"#   Example:\n"
+"#     ax^Don & tT~peace\n"
+"#   artist (a) or remixer (x) field starts with Don (case-sensitive) and\n"
+"#   title (t) album (T) contains \"peace\".\n"
+"#\n"
+"# \"~\" tests whether given PCRE regular expression (VALUE) matches metadata.\n"
+"# May be omitted since it is the default.\n"
+"#\n"
+"# \"<\", \">\" compares pairs of integers. All non-digits are ignored.\n"
+"#   Example:\n"
+"#     y<2001.02.03.\n"
+"#   Matches songs with y~'2000', y~'2000-04.10', y~'2001X02',\n"
+"#   y~'xyz 2001 abc 2/1'.\n"
+"#     y<=2001.02.03\n"
+"#   Also matches y='2001-02-03'\n"
+"#     o~flac o>44 \n"
+"#   High-resolution FLAC files.\n"
+"#\n"
+"# If VALUE is omitted it is taken from the currently playing file.\n"
+"# For KEYs with multiple occurences only the first one is considered.\n"
+"#   Example:\n"
+"#     T\n"
+"#     y A T\n"
+"#   Match tracks from the same album.\n"
+"#     A (same as: A~'Good')\n"
+"#   With currently playing having A='Good;Bad;Ugly'.\n"
 "#\n"
 "# VALUE is matched caseless unless it contains uppercase letter.\n"
+"#   Example:\n"
+"#     t~ear (case-insensitive)\n"
+"#     t~Ear (case-sensitive)\n"
+"#   Both match songs named 'Ear' but only the first one matches 'Heart'.\n"
 "#\n"
-"# When file has no tags KEYs marked with '+' match VALUE is against URL.\n"
+"# If file has no tags, KEYs marked with \"+\" match VALUE against URL.\n"
+"#   Example:\n"
+"#     a~jimmy t~sunshine\n"
+"#   For unscanned files both 'jimmy' and 'sunshine' are searched in URL,\n"
+"#   thus it will match appropriately named files, e.g. 'Jimmy - Sunshine.mp3'.\n"
 "#\n"
-"# <, > Perform pairwise integer comparsion. Ignore every non-digit.\n"
+"# Between expressions \"!\", \"&\", \"|\" can be used to express\n"
+"# negation, and and or operations, respectively. \"&\" is the default so it\n"
+"# can be omitted. \"(\", \")\" can be used for grouping.\n"
+"#   Example:\n"
+"#     !(g~rock y<2000)\n"
+"#   All but rock before 2000.\n"
 "#\n"
-"# !    Negate.\n"
-"#\n"
-"# =    Allow equality or perform regular expression match over strings (default).\n"
-"#\n"
-"# EXAMPLES\n"
-"# ========\n"
-"#\n"
-"# MP3s from albums and tracks containing \"House\" with contribution from \"DJ Bob\" and \"Alice?number?\" from year 2000:\n"
-"#   o'mp3' House y2000 '^dj BOB$' ^Alice[0-9]+$\n"
-"#\n"
-"# \"DJ Alice\"'s tracks in period:\n"
-"#   axf\"DJ Alice\" y>='1970.03 14' y<1970-12\n"
-"#\n"
-"# Albums and tracks beginning with \"March\":\n"
-"#   aA^March\n"
-"#\n"
-"# All versions of this track:\n"
-"#   a t\n"
-"#\n"
-"# Tracks from this album:\n"
-"#   A T V\n"
-"#\n"
-"# Tracks from this year:\n"
-"#   y\n"
-"#\n"
-"# Favorite tracks:\n"
-"#   p=fav\n"
 			);
 
 	fclose(stream);
