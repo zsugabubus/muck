@@ -3033,9 +3033,6 @@ match_file_worker(FileTaskWorker *worker, void const *arg)
 static void
 search_file(char const *s)
 {
-	struct timespec start;
-	xassert(!clock_gettime(CLOCK_MONOTONIC, &start));
-
 	int old_live = live;
 	live = 1;
 	ExprParserContext parser = {
@@ -3085,16 +3082,6 @@ search_file(char const *s)
 		.filter_index = filter_index,
 	});
 	match_file_post(&master, filter_index);
-
-	struct timespec finish;
-	xassert(!clock_gettime(CLOCK_MONOTONIC, &finish));
-
-	static long const NS_PER_SEC = 1000000000;
-	double elapsed =
-		((finish.tv_sec - start.tv_sec) * NS_PER_SEC +
-		 (finish.tv_nsec - start.tv_nsec)) /
-		(double)NS_PER_SEC;
-	fprintf(fmsg, "Search finished in %.3f s\n", elapsed);
 
 out:
 	expr_free(query);
