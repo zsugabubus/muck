@@ -1,4 +1,7 @@
 project('muck', 'c',
+	version: run_command(
+		'git describe --always --tags --dirty --match v*'.split(' ')
+	).stdout().strip(),
 	default_options: [
 		'c_std=c11',
 		'warning_level=2',
@@ -9,6 +12,10 @@ add_project_arguments([
 	'-D_DEFAULT_SOURCE',
 	'-D_GNU_SOURCE',
 	'-D_XOPEN_SOURCE=700',
+	'-DMUCK_VERSION="@0@ @1@"'.format(
+		meson.project_name(),
+		meson.project_version(),
+	),
 ], language: 'c')
 
 cc = meson.get_compiler('c')

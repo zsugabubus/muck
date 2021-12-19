@@ -4648,7 +4648,7 @@ main(int argc, char **argv)
 
 	if (!(tty = fopen(ctermid(NULL), "w+e"))) {
 		fprintf(stderr, "Could not connect to TTY\n");
-		return EXIT_FAILURE;
+		exit(EXIT_FAILURE);
 	}
 
 	{
@@ -4657,7 +4657,7 @@ main(int argc, char **argv)
 				getenv("XDG_RUNTIME_DIR"));
 		if (!(fmsg = fopen(msg_path, "ae"))) {
 			fprintf(stderr, "Could not open messages file\n");
-			return EXIT_FAILURE;
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -4748,7 +4748,7 @@ main(int argc, char **argv)
 
 	/* Setup ended, can load files now. */
 	char const *startup_cmd = NULL;
-	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:n:m:s:d"));)
+	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:n:m:s:dv"));)
 		switch (c) {
 		case 'q':
 			search_history[0] = strdup(optarg);
@@ -4785,6 +4785,10 @@ main(int argc, char **argv)
 		case 'd':
 			av_log_set_level(av_log_get_level() < AV_LOG_DEBUG ? AV_LOG_DEBUG : AV_LOG_TRACE);
 			break;
+
+		case 'v':
+			puts(MUCK_VERSION);
+			exit(EXIT_SUCCESS);
 
 		default:
 			exit(EXIT_FAILURE);
