@@ -48,10 +48,9 @@ OPTIONS
        -q QUERY
               Execute initial search query.
 
-       -x COMMAND
-              Execute COMMAND at startup.
-
-              Default: s (begin playing from the first file).
+       -e COMMAND
+              Execute COMMAND at startup. Default: s (begin playing  from  the
+              first file).
 
        -a FILTERGRAPH
               Specify filtergraph to use. See ffplay(1) -af.
@@ -59,50 +58,75 @@ OPTIONS
               Default: volume=replaygain=track.  Use anull to disable.
 
        -c CODEC
-              Output codec.
-
-              Default: pcm (fake codec that uses sample format of input).
+              Set output codec. Default: pcm (fake codec that uses sample for‐
+              mat of input).
 
        -f FORMAT
-              Output format.
-
-              Default: alsa.
+              Set output format. Default: alsa.
 
        -n FILENAME
-              Output filename.
-
-              Default: (none).
+              Set output filename. Default: (none).
 
        -m SIZE
-              Maximum demuxer buffer size in kB.
+              Set maximum demuxer buffer size in kB. Default: 4096.
 
-              Default: 4096.
+       -s SPEC
+              Specify  column  layout.  Default:  iy30a,x25A+Fd*20Tn*40t+f+vg‐
+              bIB*LCoh*z.
 
-       -w     Allow writing user.last_play extended attributes.
+              SPEC := [ [MODIFIER] [WIDTH] KEY ]...
 
-       -d     Print debug information. Be very verbose when given twice.
+              ┌─────────┬──────────────────────────────────────────────────────┐
+              │MODIFIER │ Description                                          │
+              ├─────────┼──────────────────────────────────────────────────────┤
+              │␣        │ Join with " ".                                       │
+              ├─────────┼──────────────────────────────────────────────────────┤
+              │*        │ Make column flexible. WIDTH specifies minimum width. │
+              ├─────────┼──────────────────────────────────────────────────────┤
+              │+        │ Wrap in " (…)".                                      │
+              ├─────────┼──────────────────────────────────────────────────────┤
+              │,        │ Join with ";".                                       │
+              ├─────────┼──────────────────────────────────────────────────────┤
+              │-        │ Join with " - ".                                     │
+              ├─────────┼──────────────────────────────────────────────────────┤
+              │/        │ Join with " / ".                                     │
+              └─────────┴──────────────────────────────────────────────────────┘
+              WIDTH  specifies  required  column width. When omitted a default
+              value is used. As a special case, 0  means  key  should  not  be
+              columnized but join it to the previous column.
 
-USAGE
-   Keybindings
-       0-9, - Set Nx for next command.
+              KEY is a single letter metadata key. The complete list of recog‐
+              nized keys is available in search mode.
 
-       p, N   Seek to Nn-th (default: 1) previous file.
+       -v     Print version information and exit.
 
-       n      Seek to Nn-th next file. (Default seek command at startup.)
+KEYBINDINGS
+   Live mode
+       0-9    Set N for next command.
 
-       s      Seek to Ns-th (default: 0) file.
+       p, N, Up
+              Seek to Nth (default: 1) previous file.
 
-       r      Seek to a random file.
+       n, Down
+              Seek to Nth (default: 1) next file.
+
+       g, Home
+              Seek to N=MMSS (default: 0).
+
+              For example 100g, 60g both seek to 1 minute.
+
+       G, End Seek to N% (default: 1/Φ²≈3/8=37.5%) in the file.
+
+       s      Seek to Nth (default: 0) file.
+
+       r      Seek to a random file (other than the currently playing file).
 
        Return Seek again.
 
-       g      Seek to Ng (default: 0) seconds.
-
-       G      Seek to NG% (default: 1/Φ²≈3/8=37.5%) in the file.
-
-       h, l   Seek by 5 seconds.
-
        j, k   Seek by 5% but at least 5 seconds.
+
+       h, l, Left, Right
+              Seek by 5 seconds.
 
        .      Pause playback.
 
@@ -110,35 +134,46 @@ USAGE
 
        Space  Toggle pause playback.
 
-       i      Print information about currently playing file.
+       M      Dump detailed metadata information about currently playing  file
+              into messages.
 
-       where  Print files around currently playing file.
+       /, =   Search. Further help is part of the search screen.
 
-       I, W   Toggle automatic i or w whenever seeking in playlist.
-
-       m      Print detailed metadata information about currently playing.
-
-       /, =   Search.
-
-              Detailed manual is part of the search screen.
-
-       +, -   Change volume property of volume filter by +1% and  -2%  respec‐
+       +, -   Change  volume  property of volume filter by +1% and -2% respec‐
               tively.
 
        *      Toggle mute. Uses volume filter.
 
-       S      Print statistics.
+       H, L, Shift+Left, Shift+Right
+              Scroll file list horizontally.
 
-       Z, Q, q
+       v      Switch between live and visual modes. Live mode is the default.
+
+       m      Show messages.
+
+       Ctrl+L Refresh screen.
+
+       Z, Q, q, F10
               Quit.
 
-       Escape Ignore.
+       ?, F1  Open manual.
 
        (other letter)
               Execute $MUCK_HOME/{KEY}.
 
-              $MUCK_*  environment  variables  are set, based on the currently
+              $MUCK_* environment variables are set, based  on  the  currently
               playing file.
+
+   Visual mode
+       p, N, Up, n, Down, g, Home, G, End, s, r, /, =
+              Same as in live mode but do not start playing.
+
+       Return Start playing current file.
+
+       j, k   Move selection.
+
+       (other)
+              Same as in live mode.
 
 ENVIRONMENT
        EDITOR Editor to use for text-editing operations.
@@ -166,7 +201,7 @@ EXAMPLE
               PLAYLIST
 
 SEE ALSO
-       ffmpeg(1) ffplay(1) realpath(1)
+       ffmpeg(1) ffplay(1)
 
 AUTHORS
        Written by zsugabubus.
@@ -176,4 +211,4 @@ LICENSE
 
 
 
-                                  August 2021                          MUCK(1)
+                                 December 2021                         MUCK(1)
