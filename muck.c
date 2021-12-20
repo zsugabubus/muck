@@ -131,7 +131,7 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 	xmacro('C', catalog, 15, 0) \
 	xmacro('y', date, 10, 0) \
 	xmacro('o', codec, 18, 0) \
-	xmacro('h', mtime, 10, 0) \
+	xmacro('m', mtime, 10, 0) \
 	xmacro('l', length, 5, 0) \
 	xmacro('z', comment, 20, 0)
 
@@ -427,7 +427,7 @@ static File *seek_file0;
 static int64_t _Atomic seek_file_pts = AV_NOPTS_VALUE;
 static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
-static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoh*z";
+static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCom*z";
 
 static char number_cmd = '\0';
 static int64_t cur_number;
