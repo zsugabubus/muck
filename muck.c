@@ -1137,6 +1137,37 @@ read_file(Playlist *parent, AnyFile *a)
 }
 
 static void
+write_file(File const *f, FILE *stream)
+{
+	int any = 0;
+	for (enum Metadata i = 0; i < M_NB; ++i) {
+		if (!f->metadata[i])
+			continue;
+		if (M_length == i)
+			continue;
+
+		if (!any)
+			fprintf(stream, "#EXTINF:%s",
+					f->metadata[M_length]
+						? f->a.url + f->metadata[M_length]
+						: "");
+
+		fprintf(stream, " %s=\"", METADATA_NAMES[i]);
+		for (char const *c = f->a.url + f->metadata[i]; *c; ++c) {
+			if ('"' == *c || '\\' == *c)
+				fputc('\\', stream);
+			fputc(*c, stream);
+		}
+		fputc('"', stream);
+
+		any = 1;
+	}
+
+	if (any)
+		fputs(",\n", stream);
+}
+
+static void
 write_playlist(Playlist *playlist, FILE *stream)
 {
 	fprintf(stream, "#EXTM3U\n");
@@ -1144,39 +1175,8 @@ write_playlist(Playlist *playlist, FILE *stream)
 		fprintf(stream, "#PLAYLIST:%s\n", playlist->name);
 
 	for_each_file() {
-		if (a->type <= F_FILE) {
-			File const *f = (void *)a;
-
-			int any = 0;
-			for (enum Metadata i = 0; i < M_NB; ++i) {
-				if (!f->metadata[i])
-					continue;
-				if (M_length == i)
-					continue;
-
-				if (!any)
-					fprintf(stream, "#EXTINF:%s",
-							f->metadata[M_length]
-								? f->a.url + f->metadata[M_length]
-								: "");
-
-				fprintf(stream, " %s=\"", METADATA_NAMES[i]);
-				for (char const *c = f->a.url + f->metadata[i];
-				     *c;
-				     ++c)
-				{
-					if ('"' == *c || '\\' == *c)
-						fputc('\\', stream);
-					fputc(*c, stream);
-				}
-				fputc('"', stream);
-
-				any = 1;
-			}
-
-			if (any)
-				fputs(",\n", stream);
-		}
+		if (a->type <= F_FILE)
+			write_file((File *)a, stream);
 		fprintf(stream, "%s\n", a->url);
 	}
 }
