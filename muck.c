@@ -4700,8 +4700,10 @@ main(int argc, char **argv)
 
 		for (;;) {
 			int rc = ppoll(&pollfd, 1, NULL, &sigmask);
-			if (rc <= 0)
+			if (rc <= 0 && EINTR == errno)
 				continue;
+			if (rc <= 0 || (~POLLIN & pollfd.revents))
+				exit(EXIT_SUCCESS);
 
 			for (int key; ERR != (key = getch());)
 				do_key(key);
