@@ -132,7 +132,7 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 	xmacro('y', date, 10, 0) \
 	xmacro('o', codec, 18, 0) \
 	xmacro('m', mtime, 10, 0) \
-	xmacro('l', length, 5, 0) \
+	xmacro('l', length, 6, 0) \
 	xmacro('z', comment, 20, 0)
 
 /* Extra metadata-like stuff. */
@@ -4146,12 +4146,12 @@ draw_files(void)
 		}
 
 		c->mod = mod;
-		c->width = n + 1 /* Padding SP between columns. */;
+		c->width = n;
 		c->mx = mx;
 
 		stars += '*' == mod;
 		if (iscol)
-			totw += c->width;
+			totw += c->width + 1 /* SP */;
 
 		s = end + 1;
 
@@ -4229,7 +4229,7 @@ draw_files(void)
 		char const *name = METADATA_NAMES[c->m];
 		int i = 0;
 
-		for (; name[i] && i + 1 < c->width; ++i) {
+		for (; name[i] && i < c->width; ++i) {
 			char t;
 			switch (name[i]) {
 			case '_':
@@ -4243,7 +4243,7 @@ draw_files(void)
 			addch(t);
 		}
 
-		for (; i < c->width; ++i)
+		for (; i <= c->width; ++i)
 			addch(' ');
 	}
 	for (int curx = getcurx(stdscr); curx < COLS; ++curx)
@@ -4271,11 +4271,8 @@ draw_files(void)
 
 		if (!pos.f->metadata[M_title]) {
 			char const *url = pos.f->a.url;
-			if (F_URL != pos.f->a.type) {
-				char const *p = strrchr(url, '/');
-				if (p && p[1])
-					url = p + 1;
-			}
+			if (F_URL != pos.f->a.type)
+				url = get_metadata(pos.p, pos.f, MX_name);
 			addstr(url);
 			for (int curx = getcurx(stdscr); curx < COLS; ++curx)
 				addch(' ');
@@ -4295,48 +4292,71 @@ draw_files(void)
 						}
 					}
 
-					x += c->width;
+					x += c->width + 1 /* SP */;
 				}
 
-				if (s) {
-					switch (c->mod) {
-					case ' ':
-						addch(' ');
+				if (!s)
+					continue;
+
+				switch (c->mod) {
+				case ' ':
+					addch(' ');
+					break;
+
+				case ',':
+					addch(';');
+					break;
+
+				case '+':
+					switch (c->m) {
+					case M_featured_artist:
+					case M_album_featured_artist:
+						addstr(" (ft. ");
 						break;
 
-					case ',':
-						addch(';');
-						break;
-
-					case '+':
-						switch (c->m) {
-						case M_featured_artist:
-						case M_album_featured_artist:
-							addstr(" (ft. ");
-							break;
-
-						default:
-							addstr(" (");
-							break;
-						}
-						break;
-
-					case '-':
-						addstr(" - ");
-						break;
-
-					case '/':
-						addstr(" / ");
+					default:
+						addstr(" (");
 						break;
 					}
-					if (c->m == M_title)
-						sel_x = getcurx(stdscr);
+					break;
+
+				case '-':
+					addstr(" - ");
+					break;
+
+				case '/':
+					addstr(" / ");
+					break;
+				}
+
+				if (M_title == c->m)
+					sel_x = getcurx(stdscr);
+
+				switch (c->m) {
+				case M_track:
+				case M_disc:
+				case M_bpm:
+					printw("%*s", c->width, s);
+					break;
+
+				case M_length:
+				{
+					uint64_t n = strtoull(s, NULL, 10);
+					printw("%*"PRIu64":%02u",
+							c->width - 3 /* :00 */,
+							n / 60,
+							(unsigned)(n % 60));
+				}
+					break;
+
+				default:
 					addstr(s);
-					switch (c->mod) {
-					case '+':
-						addstr(")");
-						break;
-					}
+				}
+
+				switch (c->mod) {
+				case '+':
+					addstr(")");
+					break;
 				}
 			}
 
