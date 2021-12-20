@@ -4468,15 +4468,14 @@ main(int argc, char **argv)
 	}
 	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
 
-	{
-		snprintf(msg_path, sizeof msg_path,
-				"%s/muck.txt",
-				getenv("XDG_RUNTIME_DIR"));
-		if (!(fmsg = fopen(msg_path, "ae"))) {
-			fprintf(stderr, "Could not open messages file\n");
-			exit(EXIT_FAILURE);
-		}
+	snprintf(msg_path, sizeof msg_path,
+			"%s/muck.txt",
+			getenv("XDG_RUNTIME_DIR"));
+	if (!(fmsg = fopen(msg_path, "ae"))) {
+		fprintf(stderr, "Could not open messages file\n");
+		exit(EXIT_FAILURE);
 	}
+	xassert(0 <= setvbuf(fmsg, NULL, _IOLBF, 0));
 
 	atexit(bye);
 
