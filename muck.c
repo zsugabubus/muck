@@ -429,7 +429,7 @@ static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
 static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vgbIB*LCoh*z";
 
-static char has_number = '\0';
+static char number_cmd = '\0';
 static int64_t cur_number;
 static int sel_y, sel_x;
 static int scroll_x;
@@ -3699,22 +3699,33 @@ play_or_select_file(File *f)
 }
 
 static void
+use_number(char c, int64_t def)
+{
+	if ('0' == number_cmd)
+		number_cmd = c;
+	else if (c != number_cmd)
+		cur_number = def;
+}
+
+static void
 do_key(int c)
 {
 	if ('0' <= c && c <= '9') {
-		cur_number = 10 * ('0' == has_number ? cur_number : 0) + (c - '0');
-		has_number = '0';
+		cur_number = 10 * ('0' == number_cmd ? cur_number : 0) + (c - '0');
+		number_cmd = '0';
 		notify_event(EVENT_STATE_CHANGED);
 		return;
 	}
 
 	switch (c) {
 	case CONTROL('D'):
+		number_cmd = '0';
 		cur_number = (LINES - 2) / 2;
 		c = 'n';
 		break;
 
 	case CONTROL('U'):
+		number_cmd = '0';
 		cur_number = (LINES - 2) / 2;
 		c = 'p';
 		break;
@@ -3725,12 +3736,9 @@ do_key(int c)
 		break;
 	}
 
-	if ('0' != has_number && c != has_number)
-		has_number = '\0';
-
 	switch (c) {
 	case '*':
-		atomic_store_lax(&volume, has_number ? cur_number : -volume);
+		atomic_store_lax(&volume, '0' == number_cmd ? cur_number : -volume);
 		notify_event(EVENT_STATE_CHANGED);
 		break;
 
@@ -3831,18 +3839,18 @@ do_key(int c)
 
 	case 's': /* Set. */
 	{
+		int64_t n = '0' == number_cmd ? cur_number : 0;
+
 		if (live) {
 			/* Stay close to file, even if it fails to play. */
 			if ('p' != seek_cmd && 'n' != seek_cmd) {
 				seek_cmd = 'n';
+				number_cmd = 1;
 				notify_event(EVENT_STATE_CHANGED);
 			}
 		}
 
-		if (!has_number)
-			cur_number = 0;
-
-		PlaylistFile pf = seek_playlist(&master, NULL, cur_number, SEEK_SET);
+		PlaylistFile pf = seek_playlist(&master, NULL, n, SEEK_SET);
 		play_or_select_file(pf.f);
 	}
 		break;
@@ -3856,15 +3864,14 @@ do_key(int c)
 		char old_seek_cmd = seek_cmd;
 		int dir = 'n' == c || KEY_DOWN == c ? 1 : -1;
 		seek_cmd = 0 < dir ? 'n' : 'p';
+		use_number('n', 1);
 		notify_event(EVENT_STATE_CHANGED);
-		if (!has_number)
-			cur_number = 1;
 
 		if ('g' == old_seek_cmd)
 			break;
 
 		PlaylistFile cur = get_current_pf();
-		PlaylistFile pf = seek_playlist(&master, &cur, dir * cur_number, SEEK_CUR);
+		PlaylistFile pf = seek_playlist(&master, &cur, cur_number * dir, SEEK_CUR);
 		play_or_select_file(pf.f);
 	}
 		break;
@@ -3873,10 +3880,8 @@ do_key(int c)
 	case KEY_HOME:
 	{
 		seek_cmd = 'g';
+		use_number('g', 0);
 		notify_event(EVENT_STATE_CHANGED);
-
-		if (!has_number)
-			cur_number = 0;
 
 		if (live) {
 			seek_player(cur_number / 100 * 60 /* min */ + cur_number % 100 /* sec */, SEEK_SET);
@@ -3889,17 +3894,13 @@ do_key(int c)
 
 	case 'G': /* GO TO. */
 	case KEY_END:
-	{
-		if (!has_number)
-			cur_number = 100 * 3 / 8;
-
 		if (live) {
-			seek_player(atomic_load_lax(&cur_duration) * cur_number / 100, SEEK_SET);
+			int64_t n = '0' == number_cmd ? cur_number : 100 * 3 / 8;
+			seek_player(atomic_load_lax(&cur_duration) * n / 100, SEEK_SET);
 		} else {
 			sel = seek_playlist(&master, NULL, 0, SEEK_END).f;
 			notify_event(EVENT_FILE_CHANGED);
 		}
-	}
 		break;
 
 	case 'H':
@@ -3914,18 +3915,28 @@ do_key(int c)
 	case KEY_LEFT:
 	case 'l':
 	case KEY_RIGHT:
-		seek_player(('h' == c || KEY_LEFT == c ? -1 : 1) * 5, SEEK_CUR);
+	{
+		int64_t n = '0' == number_cmd ? cur_number : 5;
+		seek_player(n * ('h' == c || KEY_LEFT == c ? -1 : 1), SEEK_CUR);
+	}
 		break;
 
 	case 'j':
 	case 'k':
+	{
+		int dir = 'j' == c ? -1 : 1;
 		if (live) {
-			seek_player(('j' == c ? -1 : 1) * FFMAX(atomic_load_lax(&cur_duration) / 16, +5), SEEK_CUR);
+			int64_t n = '0' == number_cmd
+				? cur_number
+				: FFMAX(atomic_load_lax(&cur_duration) / 16, +5);
+			seek_player(n * dir, SEEK_CUR);
 		} else {
 			PlaylistFile cur = get_current_pf();
-			sel = seek_playlist(&master, &cur, 'j' == c ? 1 : -1, SEEK_CUR).f;
+			int64_t n = '0' == number_cmd ? cur_number : 1;
+			sel = seek_playlist(&master, &cur, n * -dir, SEEK_CUR).f;
 			notify_event(EVENT_FILE_CHANGED);
 		}
+	}
 		break;
 
 	case '.':
@@ -4033,7 +4044,11 @@ do_key(int c)
 		break;
 	}
 
-	has_number = c;
+	if ('0' == number_cmd) {
+		number_cmd = '\0';
+		cur_number = 0;
+		notify_event(EVENT_STATE_CHANGED);
+	}
 }
 
 static void
