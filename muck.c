@@ -62,6 +62,8 @@ enum {
 	KEY_FOCUS_IN = 1001,
 	KEY_FOCUS_OUT = 1002,
 };
+static char const SEND_FOCUS_EVENTS[] = "\033[?1004h";
+static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 
 #define atomic_exchange_lax(...) atomic_exchange_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_add_lax(...) atomic_fetch_add_explicit(__VA_ARGS__, memory_order_relaxed)
@@ -2774,6 +2776,7 @@ worker_get(FileTaskWorker *worker, PlaylistFile *cur)
 static int
 spawn(void)
 {
+	fputs(STOP_FOCUS_EVENTS, tty);
 	endwin();
 
 	pid_t pid;
@@ -2811,6 +2814,7 @@ spawn(void)
 	}
 
 	refresh();
+	fputs(SEND_FOCUS_EVENTS, tty);
 
 	return rc;
 }
@@ -3401,6 +3405,7 @@ save_master(void)
 static void
 bye(void)
 {
+	fputs(STOP_FOCUS_EVENTS, tty);
 	endwin();
 
 	xassert(!pthread_mutex_lock(&file_lock));
@@ -4461,6 +4466,7 @@ main(int argc, char **argv)
 		fprintf(stderr, "Could not connect to TTY\n");
 		exit(EXIT_FAILURE);
 	}
+	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
 
 	{
 		snprintf(msg_path, sizeof msg_path,
@@ -4681,10 +4687,9 @@ main(int argc, char **argv)
 		meta(stdscr, TRUE);
 		curs_set(0);
 
-		fprintf(tty, "\033[?1004h"); /* Send FocusIn/FocusOut events. */
-
 		define_key("\033[I", KEY_FOCUS_IN);
 		define_key("\033[O", KEY_FOCUS_OUT);
+		fputs(SEND_FOCUS_EVENTS, tty);
 
 		struct pollfd pollfd;
 		pollfd.fd = fileno(tty);
