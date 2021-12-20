@@ -427,7 +427,7 @@ static File *seek_file0;
 static int64_t _Atomic seek_file_pts = AV_NOPTS_VALUE;
 static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
-static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vgbIB*LCoh*z";
+static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoh*z";
 
 static char number_cmd = '\0';
 static int64_t cur_number;
