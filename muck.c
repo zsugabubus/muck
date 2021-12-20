@@ -132,7 +132,7 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 	xmacro('y', date, 10, 0) \
 	xmacro('o', codec, 18, 0) \
 	xmacro('h', mtime, 10, 0) \
-	xmacro('d', duration, 5, 0) \
+	xmacro('l', length, 5, 0) \
 	xmacro('z', comment, 20, 0)
 
 /* Extra metadata-like stuff. */
@@ -800,7 +800,7 @@ read_playlist(Playlist *playlist, int fd)
 			if (IS_DIRECTIVE("EXTINF:")) {
 				RESET_FDATA;
 
-				file.metadata[M_duration] = 0;
+				file.metadata[M_length] = 0;
 				while ('0' <= *col && *col <= '9') {
 					if (sizeof fdata <= fdata_size) {
 					fail_too_long:
@@ -838,7 +838,7 @@ read_playlist(Playlist *playlist, int fd)
 					switch (m) {
 					case M_NB:
 					/* Supplied in another way. */
-					case M_duration:
+					case M_length:
 						error_msg = "Unknown parameter";
 						goto out;
 
@@ -1151,13 +1151,13 @@ write_playlist(Playlist *playlist, FILE *stream)
 			for (enum Metadata i = 0; i < M_NB; ++i) {
 				if (!f->metadata[i])
 					continue;
-				if (M_duration == i)
+				if (M_length == i)
 					continue;
 
 				if (!any)
 					fprintf(stream, "#EXTINF:%s",
-							f->metadata[M_duration]
-								? f->a.url + f->metadata[M_duration]
+							f->metadata[M_length]
+								? f->a.url + f->metadata[M_length]
 								: "");
 
 				fprintf(stream, " %s=\"", METADATA_NAMES[i]);
@@ -1414,7 +1414,7 @@ read_metadata(Input const *in)
 		/* Append duration. */
 		int64_t duration = in->s.format_ctx->duration;
 		if (AV_NOPTS_VALUE != duration) {
-			int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_duration,
+			int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_length,
 					"%"PRId64,
 					av_rescale(duration, 1, AV_TIME_BASE));
 			if (rc < 0)
@@ -2061,7 +2061,7 @@ expr_eval(Expr const *expr, PlaylistFile pf)
 			if (!value &&
 			    !(OP_ISSET & expr->kv.op) &&
 			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
-			    !pf.f->metadata[M_duration])
+			    !pf.f->metadata[M_length])
 				value = pf.f->a.url;
 			else if (!value)
 				continue;
