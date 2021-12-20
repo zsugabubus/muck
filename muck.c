@@ -3982,6 +3982,7 @@ do_key(int c)
 
 	case CONTROL('M'):
 		play_file(get_current_pf().f, AV_NOPTS_VALUE);
+		pause_player(0);
 		break;
 
 	case 'Z': /* Zzz. */
