@@ -2542,7 +2542,7 @@ typedef struct {
 static void
 match_file(PlaylistFile pf, MatchFileArg const *arg)
 {
-	assert(pf.f->a.type == F_FILE);
+	assert(pf.f->a.type <= F_FILE);
 	assert(arg->filter_index);
 
 	uint32_t filter_mask = UINT32_C(1) << arg->filter_index;
