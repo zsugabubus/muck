@@ -3768,6 +3768,7 @@ do_key(int c)
 	case 'v':
 		if (atomic_fetch_xor_explicit(&live, 1, memory_order_relaxed))
 			atomic_store_lax(&sel, atomic_load_lax(&in0.pf.f));
+		cur_filter[0] = cur_filter[1];
 		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 		break;
 
