@@ -1326,50 +1326,116 @@ fdata_writef(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char 
 	return 0;
 }
 
-static void
-sanitize_metadata_count(File *f, enum Metadata count, enum Metadata total)
+static int
+fdata_write(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char const *value)
 {
-	if (!f->metadata[count])
-		return;
+	size_t old_fdata_size = *fdata_size;
+	int any = !!tmpf->metadata[m];
 
-	char *p = strchr(f->a.url + f->metadata[count], '/');
-	if (p) {
-		*p = '\0';
-		if (!f->metadata[total])
-			f->metadata[total] = (p + 1 /* Over /. */) - f->a.url;
-	}
-}
+	if (!any) {
+		tmpf->metadata[m] = *fdata_size;
+	} else {
+		switch (m) {
+		case M_track:
+		case M_disc:
+			/* Multiplicity is not supported because fdata was may
+			 * be interrupted with M_*_total part. */
+			return 0;
 
-static void
-sanitize_metadata(File *f)
-{
-	sanitize_metadata_count(f, M_disc, M_disc_total);
-	sanitize_metadata_count(f, M_track, M_track_total);
-
-	static enum Metadata const TRIM_ZEROS[] = {
-		M_disc,
-		M_disc_total,
-		M_track,
-		M_track_total,
-	};
-
-	for (size_t i = 0; i < ARRAY_SIZE(TRIM_ZEROS); ++i) {
-		enum Metadata m = TRIM_ZEROS[i];
-		if (f->metadata[m]) {
-			char c;
-			while ('0' == (c = f->a.url[f->metadata[m]]))
-				++f->metadata[m];
-			if (!c)
-				f->metadata[m] = 0;
+		default:
+			fdata[*fdata_size - 1] = ';';
+			break;
 		}
 	}
+
+	char pc = '\0';
+	for (;; ++value) {
+		if (UINT16_MAX <= *fdata_size)
+			return -1;
+		if (!*value)
+			break;
+		char c = (unsigned char)*value < ' ' ? ' ' : *value;
+		switch (m) {
+		default:
+			/* Nothing. */
+			break;
+
+		case M_track:
+		case M_disc:
+			if ('/' == c)
+				goto eos;
+			/* FALLTHROUGH */
+		case M_track_total:
+		case M_disc_total:
+		case M_date:
+		case M_bpm:
+			/* Trim leading zeros. */
+			if (!pc && '0' == c)
+				continue;
+		}
+		if ((!pc || ' ' == pc) && ' ' == c)
+			continue;
+		fdata[(*fdata_size)++] = c;
+		pc = c;
+	}
+eos:
+	*fdata_size -= ' ' == pc;
+	if (old_fdata_size == *fdata_size) {
+	rollback:
+		if (!any)
+			tmpf->metadata[m] = 0;
+		else
+			fdata[old_fdata_size] = '\0';
+		return 0;
+	}
+	fdata[(*fdata_size)++] = '\0';
+
+	if (M_date == m &&
+	    *fdata_size - old_fdata_size == 8 + 1 /* NUL */)
+	{
+		if (UINT16_MAX <= *fdata_size + 2)
+			return -1;
+
+		/*-    543210
+		 * 11112233Z
+		 * 1111-22-33Z
+		 *          ^*/
+		memmove(&fdata[*fdata_size - 1], &fdata[*fdata_size - 3], 3);
+		memmove(&fdata[*fdata_size - 4], &fdata[*fdata_size - 5], 2);
+		fdata[*fdata_size - 2] = '-';
+		fdata[*fdata_size - 5] = '-';
+		*fdata_size += 2;
+	}
+
+	/* Use most precise date. */
+	if (M_date == m && any) {
+		if (old_fdata_size - tmpf->metadata[m] < *fdata_size - old_fdata_size) {
+			memmove(&fdata[tmpf->metadata[m]],
+					&fdata[old_fdata_size],
+					*fdata_size - old_fdata_size);
+			*fdata_size = old_fdata_size;
+		} else {
+			goto rollback;
+		}
+	}
+
+	if (*value) {
+		assert(M_track == m || M_disc == m);
+		assert('/' == *value);
+		enum Metadata totalm = M_disc == m
+			? M_disc_total
+			: M_track_total;
+		return fdata_write(tmpf, fdata, fdata_size, totalm, value + 1);
+	}
+
+	return 0;
 }
 
 static void
 read_metadata(Input const *in)
 {
 	typedef struct {
-		enum Metadata metadata;
+		enum Metadata m;
 		char const *tags;
 	} MetadataMapEntry;
 
@@ -1433,51 +1499,18 @@ read_metadata(Input const *in)
 	for (MetadataMapEntry const *e = METADATA_MAP;
 	     e < (&METADATA_MAP)[1];
 	     ++e)
-	{
 		for (char const *key = e->tags;
 		     *key;
 		     key += strlen(key) + 1 /* NUL */)
 		{
-			int any = 0;
 			for (AVDictionaryEntry const *t = NULL;
 			     (t = av_dict_get(m, key, t, 0));)
-			{
-				char const *src = t->value;
-				while ((unsigned char)*src <= ' ')
-					++src;
-
-				size_t n = strlen(src) + 1 /* NUL */;
-				/* Ignore useless tags. */
-				if (1 == n ||
-				    (2 == n && !memcmp(src, "0", 1)))
-					continue;
-
-				if (UINT16_MAX < fdata_size + n)
+				if (fdata_write(&tmpf, fdata, &fdata_size, e->m, t->value) < 0)
 					goto fail_too_long;
 
-				if (!any)
-					tmpf.metadata[e->metadata] = fdata_size;
-				else
-					fdata[fdata_size - 1] = ';';
-
-				char *dest = fdata + fdata_size;
-				fdata_size += n;
-
-				for (; --n; ++dest, ++src)
-					*dest = (unsigned char)*src < ' ' ? ' ' : *src;
-
-				while (' ' == dest[-1])
-					--dest;
-
-				*dest = '\0';
-
-				any = 1;
-			}
-
-			if (any)
+			if (tmpf.metadata[e->m])
 				break;
 		}
-	}
 
 	{
 		char buf[128];
@@ -1526,7 +1559,6 @@ read_metadata(Input const *in)
 	f->a.url = p;
 
 	memcpy(f->metadata, tmpf.metadata, sizeof tmpf.metadata);
-	sanitize_metadata(f);
 
 	return;
 
