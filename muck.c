@@ -1996,7 +1996,7 @@ get_metadata(Playlist const *playlist, File const *f, enum MetadataX m)
 	case MX_name:
 	{
 		char const *p = strrchr(f->a.url, '/');
-		return p ? p + 1 : f->a.url;
+		return p && p[1] ? p + 1 : f->a.url;
 	}
 
 	case MX_playlist:
