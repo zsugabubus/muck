@@ -138,8 +138,8 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 /* Extra metadata-like stuff. */
 #define METADATAX \
 	xmacro('i', index, 0, 0) \
-	xmacro('u', name, 30, 0) \
-	xmacro('U', url, 50, 0) \
+	xmacro('u', name, 30, 1) \
+	xmacro('U', url, 50, 1) \
 	xmacro('p', playlist, 15, 0)
 
 #define METADATA_ALL METADATA METADATAX
@@ -2164,9 +2164,8 @@ expr_parse_kv(ExprParserContext *parser)
 		enum MetadataX m = p - METADATA_LETTERS;
 		expr->kv.keys |= UINT64_C(1) << m;
 	}
-	/* Default to all keys. */
 	if (!expr->kv.keys)
-		expr->kv.keys = (UINT64_C(1) << MX_NB) - 1;
+		expr->kv.keys = METADATA_IN_URL;
 
 	if ('?' == *parser->ptr) {
 		++parser->ptr;
@@ -3553,7 +3552,7 @@ open_visual_search(void)
 	fprintf(stream,
 "# }\n"
 "#\n"
-"# If KEY is omitted it defaults to all possible keys.\n"
+"# If KEY is omitted it defaults to keys marked with \"+\".\n"
 "#   Example:\n"
 "#     ~love.*bugs\n"
 "#     'all star'\n"
