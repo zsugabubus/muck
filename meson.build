@@ -47,25 +47,27 @@ ffmpeg_dep = declare_dependency(
 		dependency('x11'),
 		dependency('zlib'),
 		dependency('ncursesw'),
-		dependency('libpcre2-posix'),
+		dependency('libpcre2-8'),
 
 	],
 )
 
 config = configuration_data()
-foreach fn: [
-	'pthread_setname_np',
-]
+foreach fn: ['pthread_setname_np']
 	config.set10('HAVE_' + fn.to_upper(), cc.has_function(
 		fn,
 		prefix: '#define _GNU_SOURCE\n#include <pthread.h>',
 		dependencies: [dependency('threads')]
 	))
 endforeach
-foreach fn: [
-	'__builtin_expect'
-]
+foreach fn: ['__builtin_expect']
 	config.set10('HAVE_' + fn.to_upper(), cc.has_function(fn))
+endforeach
+foreach fn: ['strchrnul']
+	config.set10('HAVE_' + fn.to_upper(), cc.has_function(
+		fn,
+		prefix: '#define _GNU_SOURCE\n#include <string.h>',
+	))
 endforeach
 config.set10('CONFIG_VALGRIND', get_option('buildtype').contains('debug'))
 configure_file(output: 'config.h', configuration: config)

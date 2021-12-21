@@ -1,11 +1,11 @@
 #include <assert.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <locale.h>
 #include <ncurses.h>
 #include <poll.h>
 #include <pthread.h>
-#include <pcre2posix.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -16,6 +16,10 @@
 #include <sys/xattr.h>
 #include <termios.h>
 #include <unistd.h>
+
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+_Static_assert(8 == CHAR_BIT);
 
 /* FFmpeg. */
 #include <libavcodec/avcodec.h>
@@ -50,6 +54,15 @@
 
 #if !HAVE_PTHREAD_SETNAME_NP
 # define pthread_setname_np(...) (void)0
+#endif
+
+#if !HAVE_STRCHRNUL
+static char *
+strchrnul(char const *s, char c)
+{
+	char *ret = strchr(s, c);
+	return ret ? ret : s + strlen(s);
+}
 #endif
 
 #define ARRAY_SIZE(x) (sizeof x / sizeof *x)
@@ -258,7 +271,7 @@ enum ExprType {
 };
 
 enum KeyOp {
-	OP_REG = 1 << 0,
+	OP_RE = 1 << 0,
 	OP_LT = 1 << 1,
 	OP_EQ = 1 << 2,
 	OP_GT = 1 << 3,
@@ -288,7 +301,7 @@ struct Expr {
 			uint64_t keys;
 			enum KeyOp op;
 			union {
-				regex_t reg;
+				pcre2_code *re;
 				struct {
 					uint8_t nnums;
 					uint64_t nums[5];
@@ -303,12 +316,23 @@ typedef struct {
 	char error_buf[256];
 	char const *error_msg;
 	PlaylistFile cur;
+	pcre2_match_data *match_data;
 } ExprParserContext;
 
-enum {
-	S_FILTERED,
-	S_TOTAL,
-};
+typedef struct {
+	PlaylistFile pf;
+	pcre2_match_data *match_data;
+} ExprEvalContext;
+
+typedef struct {
+	Expr *query;
+	uint8_t filter_index;
+} MatchFileContext;
+
+typedef struct {
+	MatchFileContext ctx;
+	pcre2_match_data *match_data;
+} MatchFileWorkerContext;
 
 typedef struct {
 	AVFormatContext *format_ctx;
@@ -342,7 +366,7 @@ struct FileTask {
 	int64_t remaining;
 	int64_t batch_size;
 	uint8_t nworkers;
-	void (*routine)(FileTaskWorker *, void const *);
+	int (*routine)(FileTaskWorker *, void const *);
 	FileTaskWorker workers[64];
 };
 
@@ -442,7 +466,7 @@ static atomic_uchar ALIGNED_ATOMIC focused = 1;
 static char config_home[PATH_MAX];
 static char cover_path[PATH_MAX];
 
-static regex_t reg_ucase;
+static pcre2_code *re_ucase;
 
 enum Event {
 	EVENT_FILE_CHANGED = 1 << 0,
@@ -803,7 +827,7 @@ read_playlist(Playlist *playlist, int fd)
 
 				file.metadata[M_length] = 0;
 				while ('0' <= *col && *col <= '9') {
-					if (sizeof fdata <= fdata_size) {
+					if (sizeof fdata - 1 < fdata_size) {
 					fail_too_long:
 						error_msg = "Too much data";
 						goto out;
@@ -866,7 +890,7 @@ read_playlist(Playlist *playlist, int fd)
 							goto out;
 						}
 
-						if (sizeof fdata <= fdata_size)
+						if (sizeof fdata - 1 < fdata_size)
 							goto fail_too_long;
 						fdata[fdata_size++] = *col++;
 					}
@@ -2066,27 +2090,27 @@ expr_strtou64(char const *s, uint64_t *ret)
 }
 
 static int
-expr_eval(Expr const *expr, PlaylistFile pf)
+expr_eval(Expr const *expr, ExprEvalContext const *ctx)
 {
 	if (!expr)
 		return 1;
 
 	switch (expr->type) {
 	case T_NEG:
-		return !expr_eval(expr->un.expr, pf);
+		return !expr_eval(expr->un.expr, ctx);
 
 	case T_AND:
-		return expr_eval(expr->bi.lhs, pf) && expr_eval(expr->bi.rhs, pf);
+		return expr_eval(expr->bi.lhs, ctx) && expr_eval(expr->bi.rhs, ctx);
 
 	case T_OR:
-		return expr_eval(expr->bi.lhs, pf) || expr_eval(expr->bi.rhs, pf);
+		return expr_eval(expr->bi.lhs, ctx) || expr_eval(expr->bi.rhs, ctx);
 
 	case T_KV:
 		for (uint64_t keys = expr->kv.keys; keys;) {
 			enum MetadataX m = __builtin_ctz(keys);
 			keys ^= UINT64_C(1) << m;
 
-			char const *value = get_metadata(pf.p, pf.f, m);
+			char const *value = get_metadata(ctx->pf.p, ctx->pf.f, m);
 
 			/* Fallback to the URL if metadata is missing for this
 			 * file. This way user can avoid nasty queries in a new
@@ -2094,14 +2118,27 @@ expr_eval(Expr const *expr, PlaylistFile pf)
 			if (!value &&
 			    !(OP_ISSET & expr->kv.op) &&
 			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
-			    !pf.f->metadata[M_length])
-				value = pf.f->a.url;
+			    !ctx->pf.f->metadata[M_length])
+				value = ctx->pf.f->a.url;
 			else if (!value)
 				continue;
 
-			if (OP_REG & expr->kv.op) {
-				if (REG_NOMATCH != regexec(&expr->kv.reg, value, 0, NULL, 0))
-					return 1;
+			if (OP_RE & expr->kv.op) {
+				for (char const *start = value;;) {
+					char *end = strchrnul(start, ';');
+
+					int rc = pcre2_match(expr->kv.re,
+							(uint8_t const *)start,
+							end - start,
+							0, 0, ctx->match_data, NULL);
+					if (0 <= rc)
+						return 1;
+					assert(PCRE2_ERROR_NOMATCH == rc);
+
+					if (!*end)
+						break;
+					start = end + 1;
+				}
 			} else {
 				char const *v = value;
 
@@ -2147,8 +2184,8 @@ expr_free(Expr *expr)
 		break;
 
 	case T_KV:
-		if (OP_REG & expr->kv.op)
-			regfree(&expr->kv.reg);
+		if (OP_RE & expr->kv.op)
+			pcre2_code_free(expr->kv.re);
 		break;
 
 	default:
@@ -2210,7 +2247,7 @@ expr_parse_kv(ExprParserContext *parser)
 		++parser->ptr;
 		/* FALLTHROUGH */
 	default:
-		expr->kv.op |= OP_REG;
+		expr->kv.op |= OP_RE;
 		break;
 
 	case '<':
@@ -2259,7 +2296,10 @@ expr_parse_kv(ExprParserContext *parser)
 		}
 	}
 
+	uint32_t re_flags = PCRE2_UTF | PCRE2_NO_UTF_CHECK;
 	if (!buf_size) {
+		re_flags |= PCRE2_LITERAL;
+
 		PlaylistFile cur = parser->cur;
 		if (!cur.f) {
 			parser->error_msg = "No file is playing";
@@ -2272,48 +2312,44 @@ expr_parse_kv(ExprParserContext *parser)
 
 			char const *value = get_metadata(cur.p, cur.f, m);
 			if (!value)
-				value = "";
+				continue;
+
 			while (*value && ';' != *value) {
-				switch (*value) {
-				case '(': case ')':
-				case '{': case '}':
-				case '[': case ']':
-				case '?': case '*': case '+':
-				case '.':
-				case '|':
-				case '^': case '$':
-				case '\\':
-					if (sizeof buf - 1 /* NUL */ - 2 < buf_size)
-						goto fail_too_long;
-					buf[buf_size++] = '\\';
-					break;
-
-				default:
-					if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
-						goto fail_too_long;
-					break;
-				}
-
+				if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
+					goto fail_too_long;
 				buf[buf_size++] = *value++;
 			}
 		}
+	} else {
+		re_flags |= PCRE2_DOTALL;
 	}
 
 	buf[buf_size] = '\0';
 
-	if (OP_REG & expr->kv.op) {
-		int flags = REG_EXTENDED | REG_NOSUB;
-		if (REG_NOMATCH == regexec(&reg_ucase, buf, 0, NULL, 0))
-			flags |= REG_ICASE;
 
-		int rc = regcomp(&expr->kv.reg, buf, flags);
-		if (rc) {
-			/* regex_t is not valid and should not be freed. */
-			expr->kv.op = 0;
-			regerror(rc, &expr->kv.reg, parser->error_buf, sizeof parser->error_buf);
+	if (OP_RE & expr->kv.op) {
+		int rc = pcre2_match(re_ucase,
+				(uint8_t const *)buf, buf_size, 0,
+				0, parser->match_data, NULL);
+		if (rc < 0) {
+			assert(PCRE2_ERROR_NOMATCH == rc);
+			re_flags |= PCRE2_CASELESS;
+		}
+
+		size_t error_offset;
+		int error_code;
+		expr->kv.re = pcre2_compile(
+				(uint8_t const *)buf, buf_size, re_flags,
+				&error_code, &error_offset, NULL);
+		if (!expr->kv.re) {
+			pcre2_get_error_message(error_code,
+					(uint8_t *)parser->error_buf,
+					sizeof parser->error_buf);
 			parser->error_msg = parser->error_buf;
 			goto fail;
 		}
+
+		(void)pcre2_jit_compile(expr->kv.re, PCRE2_JIT_COMPLETE);
 	} else {
 		char const *s = buf;
 		expr->kv.nnums = 0;
@@ -2358,7 +2394,7 @@ expr_cost(Expr *expr)
 		return 2 + expr_cost(expr->bi.lhs) + expr_cost(expr->bi.rhs);
 
 	case T_KV:
-		if (OP_REG & expr->kv.op)
+		if (OP_RE & expr->kv.op)
 			return 1000 * __builtin_popcount(expr->kv.keys);
 		else
 			return 100;
@@ -2568,21 +2604,19 @@ fail:
 	return NULL;
 }
 
-typedef struct {
-	Expr *query;
-	uint8_t filter_index;
-} MatchFileArg;
-
 static void
-match_file(PlaylistFile pf, MatchFileArg const *arg)
+match_file(PlaylistFile pf, MatchFileWorkerContext const *worker_ctx)
 {
 	assert(pf.f->a.type <= F_FILE);
-	assert(arg->filter_index);
+	assert(worker_ctx->ctx.filter_index);
 
-	uint32_t filter_mask = UINT32_C(1) << arg->filter_index;
-	if (expr_eval(arg->query, pf)) {
+	uint32_t filter_mask = UINT32_C(1) << worker_ctx->ctx.filter_index;
+	if (expr_eval(worker_ctx->ctx.query, &(ExprEvalContext const){
+		.pf = pf,
+		.match_data = worker_ctx->match_data,
+	})) {
 		pf.f->a.filter_mask |= filter_mask;
-		atomic_fetch_add_lax(&pf.p->child_filter_count[arg->filter_index], 1);
+		atomic_fetch_add_lax(&pf.p->child_filter_count[worker_ctx->ctx.filter_index], 1);
 	} else {
 		pf.f->a.filter_mask &= ~filter_mask;
 	}
@@ -2724,13 +2758,11 @@ task_worker(void *arg)
 	pthread_setname_np(pthread_self(), name);
 #endif
 
-	worker->task->routine(worker, worker->arg);
-
-	return NULL;
+	return (void *)(intptr_t)worker->task->routine(worker, worker->arg);
 }
 
-static void
-for_each_file_par(void (*routine)(FileTaskWorker *, void const *), void const *arg)
+static int
+for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *arg)
 {
 	static const int64_t BATCH_SIZE_MIN = 16;
 	static const int64_t BATCH_SIZE_MAX = 256;
@@ -2755,6 +2787,8 @@ for_each_file_par(void (*routine)(FileTaskWorker *, void const *), void const *a
 	task.nworkers = (task.remaining + task.batch_size - 1) / task.batch_size;
 	task.nworkers = FFMIN(task.nworkers, ncpus);
 
+	int rc;
+
 	task.routine = routine;
 	FileTaskWorker *worker = task.workers;
 	for (;;) {
@@ -2768,7 +2802,7 @@ for_each_file_par(void (*routine)(FileTaskWorker *, void const *), void const *a
 		{
 			++worker;
 		} else {
-			task.routine(worker, arg);
+			rc = task.routine(worker, arg);
 			break;
 		}
 	}
@@ -2777,6 +2811,8 @@ for_each_file_par(void (*routine)(FileTaskWorker *, void const *), void const *a
 		pthread_join(worker->thread, NULL);
 
 	xassert(0 <= pthread_mutex_destroy(&task.mutex));
+
+	return !task.remaining ? 0 : (assert(rc < 0), rc);
 }
 
 static int
@@ -2883,27 +2919,46 @@ match_file_post(Playlist *playlist, uint8_t filter_index)
 	}
 }
 
-static void
+static int
 match_file_worker(FileTaskWorker *worker, void const *arg)
 {
+	pcre2_match_data *match_data = pcre2_match_data_create(0, NULL);
+	if (!match_data)
+		return -ENOMEM;
+
+	MatchFileWorkerContext worker_ctx = {
+		.ctx = *(MatchFileContext *)arg,
+		.match_data = match_data,
+	};
+
 	for (PlaylistFile pf; worker_get(worker, &pf);)
-		match_file(pf, arg);
+		match_file(pf, &worker_ctx);
+
+	pcre2_match_data_free(match_data);
+	return 0;
 }
 
 static void
 search_file(char const *s)
 {
+	ExprParserContext parser = {};
+	Expr *query = NULL;
+
 	int old_live = live;
 	live = 1;
-	ExprParserContext parser = {
-		.ptr = s,
-		.cur = get_current_pf(),
-	};
+	parser.cur = get_current_pf(),
 	live = old_live;
 
-	Expr *query = expr_parse(&parser);
+	parser.match_data = pcre2_match_data_create(0, NULL);
+	if (!parser.match_data) {
+		parser.error_msg = "Out of memory";
+		goto out;
+	}
+
+	parser.ptr = s;
+
+	query = expr_parse(&parser);
 	if (parser.error_msg) {
-	fail:
 		endwin();
 		/* TODO: Reopen visual search. */
 		fprintf(tty, "<string>:%zu: error: %s\n",
@@ -2923,7 +2978,7 @@ search_file(char const *s)
 			goto out;
 		if (!(expr->bi.rhs = expr_parse(&parser))) {
 			expr_free(expr);
-			goto fail;
+			goto out;
 		}
 		expr->bi.lhs = query;
 		query = expr;
@@ -2937,13 +2992,15 @@ search_file(char const *s)
 	uint32_t filter_index = cur_filter[live];
 
 	match_file_pre(&master, filter_index);
-	for_each_file_par(match_file_worker, &(MatchFileArg const){
+	(void)for_each_file_par(match_file_worker, &(MatchFileContext const){
 		.query = query,
 		.filter_index = filter_index,
 	});
 	match_file_post(&master, filter_index);
 
 out:
+	pcre2_match_data_free(parser.match_data);
+
 	expr_free(query);
 }
 
@@ -3464,7 +3521,7 @@ bye(void)
 	close_output();
 	close_graph();
 
-	regfree(&reg_ucase);
+	pcre2_code_free(re_ucase);
 
 	uint16_t i = 0;
 	do
@@ -3598,7 +3655,7 @@ open_visual_search(void)
 "#   artist (a) or remixer (x) field starts with Don (case-sensitive) and\n"
 "#   title (t) album (T) contains \"peace\".\n"
 "#\n"
-"# \"~\" tests whether given PCRE regular expression (VALUE) matches metadata.\n"
+"# \"~\" tests whether given PCRE (VALUE) matches metadata.\n"
 "# May be omitted since it is the default.\n"
 "#\n"
 "# \"<\", \">\" compares pairs of integers. All non-digits are ignored.\n"
@@ -4563,7 +4620,16 @@ main(int argc, char **argv)
 
 	main_thread = pthread_self();
 
-	xassert(0 <= regcomp(&reg_ucase, "\\p{Lu}", REG_NOSUB));
+	{
+		size_t error_offset;
+		int error_code;
+		re_ucase = pcre2_compile(
+			(uint8_t const[]){ "\\p{Lu}" }, 6,
+			PCRE2_UTF | PCRE2_NO_UTF_CHECK,
+			&error_code, &error_offset,
+			NULL);
+		xassert(re_ucase);
+	}
 
 	/* Setup signals. */
 	{
