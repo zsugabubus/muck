@@ -4127,7 +4127,7 @@ draw_files(void)
 			mod = *s++;
 		int iscol = !mod || '*' == mod;
 
-		if (!iscol && COLS < totw)
+		if (iscol && COLS < totw)
 			break;
 
 		char *end;
@@ -4155,7 +4155,7 @@ draw_files(void)
 
 		s = end + 1;
 
-		if (iscol && ++nc <= scroll_x) {
+		if (iscol ? ++nc <= scroll_x : nc == scroll_x) {
 			c = defs;
 			totw = 0;
 			stars = 0;
