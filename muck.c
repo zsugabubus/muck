@@ -4601,7 +4601,7 @@ main(int argc, char **argv)
 
 	/* Setup ended, can load files now. */
 	char const *startup_cmd = NULL;
-	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:n:m:s:dv"));)
+	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:n:m:C:dv"));)
 		switch (c) {
 		case 'q':
 			search_history[0] = strdup(optarg);
@@ -4631,7 +4631,7 @@ main(int argc, char **argv)
 			buffer_bytes_max = strtoll(optarg, NULL, 10) * 1024;
 			break;
 
-		case 's':
+		case 'C':
 			column_spec = optarg;
 			break;
 
