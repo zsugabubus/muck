@@ -433,6 +433,7 @@ static char number_cmd = '\0';
 static int64_t cur_number;
 static int sel_y, sel_x;
 static int scroll_x;
+static int widen;
 
 static FILE *tty, *fmsg;
 static char msg_path[PATH_MAX];
@@ -3966,6 +3967,11 @@ do_key(int c)
 		/* TODO: Just like "a" but for all filtered files. */
 		break;
 
+	case 'w':
+		widen ^= 1;
+		notify_event(EVENT_FILE_CHANGED);
+		break;
+
 	case '?':
 	case KEY_F(1):
 		if (!spawn()) {
@@ -4102,6 +4108,8 @@ update_title(File const *f)
 static void
 draw_files(void)
 {
+	enum { SHORT_WIDTH = 10, };
+
 	typedef struct {
 		char mod;
 		int width;
@@ -4150,7 +4158,13 @@ draw_files(void)
 		c->width = n;
 		c->mx = mx;
 
-		stars += '*' == mod;
+		int w = widen && SHORT_WIDTH < c->width;
+		for (ColumnDef const *t = defs; w && t < c; ++t)
+			w &= t->width <= SHORT_WIDTH;
+		if (w)
+			c->width = 2 * c->width < COLS ? COLS / 2 + 1 : COLS;
+
+		stars += '*' == c->mod;
 		if (iscol)
 			totw += c->width + 1 /* SP */;
 
