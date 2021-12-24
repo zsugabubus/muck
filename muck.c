@@ -3625,9 +3625,9 @@ open_visual_search(void)
 "# EXPR := EXPR \"|\" EXPR\n"
 "# EXPR := \"!\" EXPR\n"
 "# VALUE := QUOTED | WORD\n"
-"# QUOTED := \"'\" { all characters - \"'\" }... \"'\"\n"
-"# QUOTED := '\"' { all characters - '\"' }... '\"'\n"
-"# WORD := [ all characters - \"'\", '\"', \" \", \"|\", \")\" ] { all characters - \" \", \"|\", \")\" }...\n"
+"# QUOTED := \"'\" [ all characters - \"'\" ]... \"'\"\n"
+"# QUOTED := '\"' [ all characters - '\"' ]... '\"'\n"
+"# WORD := { all characters - \"'\", '\"', \" \", \"|\", \")\" } [ all characters - \" \", \"|\", \")\" ]...\n"
 "# KEY := {\n"
 			);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
