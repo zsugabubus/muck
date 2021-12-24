@@ -2296,7 +2296,7 @@ expr_parse_kv(ExprParserContext *parser)
 		}
 	}
 
-	uint32_t re_flags = PCRE2_UTF | PCRE2_NO_UTF_CHECK;
+	uint32_t re_flags = PCRE2_UTF | PCRE2_MATCH_INVALID_UTF;
 	if (!buf_size) {
 		re_flags |= PCRE2_LITERAL;
 
