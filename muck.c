@@ -453,8 +453,8 @@ static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
 static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCom*z";
 
-static char number_cmd = '\0';
-static int64_t cur_number;
+static char number_cmd[2];
+static int64_t cur_number[2];
 static int sel_y, sel_x;
 static int scroll_x;
 static int widen;
@@ -3797,32 +3797,85 @@ play_or_select_file(File *f)
 static void
 use_number(char c, int64_t def)
 {
-	if ('0' == number_cmd)
-		number_cmd = c;
-	else if (c != number_cmd)
-		cur_number = def;
+	if ('0' == number_cmd[live])
+		number_cmd[live] = c;
+	else if (c != number_cmd[live])
+		cur_number[live] = def;
+}
+
+static int64_t
+get_number(int64_t def)
+{
+	if ('0' == number_cmd[live])
+		return cur_number[live];
+	else
+		return def;
+}
+
+static void
+spawn_script(int c)
+{
+	PlaylistFile pf = get_current_pf();
+	struct timespec mtim_before = get_file_mtim(pf);
+
+	if (!spawn()) {
+		if (pf.p &&
+		    AT_FDCWD != pf.p->dirfd &&
+		    fchdir(pf.p->dirfd) < 0)
+		{
+			print_error("Could not change working directory");
+			_exit(EXIT_FAILURE);
+		}
+
+		if (pf.f) {
+			if (F_FILE == pf.f->a.type)
+				setenv("MUCK_PATH", pf.f->a.url, 0);
+
+			char name[5 + sizeof *METADATA_NAMES] = "MUCK_";
+
+			for (enum MetadataX m = 0; m < MX_NB; ++m) {
+				memcpy(name + 5, METADATA_NAMES[m], sizeof *METADATA_NAMES);
+				char mbuf[FILE_METADATA_BUFSZ];
+				char const *value = get_metadata(pf.p, pf.f, m, mbuf);
+				if (value)
+					setenv(name, value, 0);
+			}
+		}
+
+		char exe[PATH_MAX];
+		snprintf(exe, sizeof exe, "%s/%c", config_home, c);
+		execl(exe, exe, pf.f->a.url, NULL);
+		print_error("No binding for '%c'", c);
+
+		_exit(EXIT_FAILURE);
+	}
+
+	struct timespec mtim_after = get_file_mtim(pf);
+
+	if (memcmp(&mtim_before, &mtim_after, sizeof mtim_before))
+		play_file(pf.f, atomic_load_lax(&cur_pts));
 }
 
 static void
 do_key(int c)
 {
 	if ('0' <= c && c <= '9') {
-		cur_number = 10 * ('0' == number_cmd ? cur_number : 0) + (c - '0');
-		number_cmd = '0';
+		cur_number[live] = 10 * get_number(0) + (c - '0');
+		number_cmd[live] = '0';
 		notify_event(EVENT_STATE_CHANGED);
 		return;
 	}
 
 	switch (c) {
 	case CONTROL('D'):
-		number_cmd = '0';
-		cur_number = (LINES - 2) / 2;
+		number_cmd[live] = '0';
+		cur_number[live] = (LINES - 2) / 2;
 		c = 'n';
 		break;
 
 	case CONTROL('U'):
-		number_cmd = '0';
-		cur_number = (LINES - 2) / 2;
+		number_cmd[live] = '0';
+		cur_number[live] = (LINES - 2) / 2;
 		c = 'p';
 		break;
 
@@ -3834,7 +3887,7 @@ do_key(int c)
 
 	switch (c) {
 	case '*':
-		atomic_store_lax(&volume, '0' == number_cmd ? cur_number : -volume);
+		atomic_store_lax(&volume, '0' == number_cmd ? cur_number[live] : -volume);
 		notify_event(EVENT_STATE_CHANGED);
 		break;
 
@@ -3864,7 +3917,11 @@ do_key(int c)
 	case 'v':
 		if (atomic_fetch_xor_explicit(&live, 1, memory_order_relaxed))
 			atomic_store_lax(&sel, atomic_load_lax(&in0.pf.f));
+		/* Keep values on entering visual mode. */
 		cur_filter[0] = cur_filter[1];
+		cur_number[0] = cur_number[1];
+		number_cmd[0] = '\0';
+		number_cmd[1] = '\0';
 		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 		break;
 
@@ -3921,28 +3978,28 @@ do_key(int c)
 		break;
 
 	case 'r': /* Random. */
-	{
-		char old_seek_cmd = seek_cmd;
-		seek_cmd = 'r';
-		notify_event(EVENT_STATE_CHANGED);
-		if ('g' == old_seek_cmd)
-			break;
+		if (live) {
+			char old_seek_cmd = seek_cmd;
+			seek_cmd = 'r';
+			notify_event(EVENT_STATE_CHANGED);
+			if ('g' == old_seek_cmd)
+				break;
+		}
 
 		PlaylistFile cur = get_current_pf();
 		PlaylistFile pf = seek_playlist(&master, &cur, POS_RND, SEEK_SET);
 		play_or_select_file(pf.f);
-	}
 		break;
 
 	case 's': /* Set. */
 	{
-		int64_t n = '0' == number_cmd ? cur_number : 0;
+		int64_t n = '0' == number_cmd ? cur_number[live] : 0;
 
 		if (live) {
 			/* Stay close to file, even if it fails to play. */
 			if ('p' != seek_cmd && 'n' != seek_cmd) {
 				seek_cmd = 'n';
-				number_cmd = 1;
+				number_cmd[live] = '\0';
 				notify_event(EVENT_STATE_CHANGED);
 			}
 		}
@@ -3960,7 +4017,8 @@ do_key(int c)
 	{
 		char old_seek_cmd = seek_cmd;
 		int dir = 'n' == c || KEY_DOWN == c ? 1 : -1;
-		seek_cmd = 0 < dir ? 'n' : 'p';
+		if (live)
+			seek_cmd = 0 < dir ? 'n' : 'p';
 		use_number('n', 1);
 		notify_event(EVENT_STATE_CHANGED);
 
@@ -3968,7 +4026,7 @@ do_key(int c)
 			break;
 
 		PlaylistFile cur = get_current_pf();
-		PlaylistFile pf = seek_playlist(&master, &cur, cur_number * dir, SEEK_CUR);
+		PlaylistFile pf = seek_playlist(&master, &cur, cur_number[live] * dir, SEEK_CUR);
 		play_or_select_file(pf.f);
 	}
 		break;
@@ -3976,12 +4034,16 @@ do_key(int c)
 	case 'g': /* Go to. */
 	case KEY_HOME:
 	{
-		seek_cmd = 'g';
+		if (live)
+			seek_cmd = 'g';
 		use_number('g', 0);
 		notify_event(EVENT_STATE_CHANGED);
 
 		if (live) {
-			seek_player(cur_number / 100 * 60 /* min */ + cur_number % 100 /* sec */, SEEK_SET);
+			uint64_t ts =
+				cur_number[live] / 100 * 60 /* min */ +
+				cur_number[live] % 100 /* sec */;
+			seek_player(ts, SEEK_SET);
 		} else {
 			sel = seek_playlist(&master, NULL, 0, SEEK_SET).f;
 			notify_event(EVENT_FILE_CHANGED);
@@ -3992,7 +4054,7 @@ do_key(int c)
 	case 'G': /* GO TO. */
 	case KEY_END:
 		if (live) {
-			int64_t n = '0' == number_cmd ? cur_number : 100 * 3 / 8;
+			int64_t n = '0' == number_cmd ? cur_number[live] : 100 * 3 / 8;
 			seek_player(atomic_load_lax(&cur_duration) * n / 100, SEEK_SET);
 		} else {
 			sel = seek_playlist(&master, NULL, 0, SEEK_END).f;
@@ -4013,7 +4075,7 @@ do_key(int c)
 	case 'l':
 	case KEY_RIGHT:
 	{
-		int64_t n = '0' == number_cmd ? cur_number : 5;
+		int64_t n = '0' == number_cmd ? cur_number[live] : 5;
 		seek_player(n * ('h' == c || KEY_LEFT == c ? -1 : 1), SEEK_CUR);
 	}
 		break;
@@ -4024,12 +4086,12 @@ do_key(int c)
 		int dir = 'j' == c ? -1 : 1;
 		if (live) {
 			int64_t n = '0' == number_cmd
-				? cur_number
+				? cur_number[live]
 				: FFMAX(atomic_load_lax(&cur_duration) / 16, +5);
 			seek_player(n * dir, SEEK_CUR);
 		} else {
 			PlaylistFile cur = get_current_pf();
-			int64_t n = '0' == number_cmd ? cur_number : 1;
+			int64_t n = '0' == number_cmd ? cur_number[live] : 1;
 			sel = seek_playlist(&master, &cur, n * -dir, SEEK_CUR).f;
 			notify_event(EVENT_FILE_CHANGED);
 		}
@@ -4148,9 +4210,9 @@ do_key(int c)
 		break;
 	}
 
-	if ('0' == number_cmd) {
-		number_cmd = '\0';
-		cur_number = 0;
+	if ('0' == number_cmd[live]) {
+		number_cmd[live] = '\0';
+		cur_number[live] = 0;
 		notify_event(EVENT_STATE_CHANGED);
 	}
 }
@@ -4521,7 +4583,7 @@ draw_progress(void)
 	move(y, 0);
 
 	attr_set(atomic_load_lax(&live) ? A_REVERSE : A_NORMAL, 0, NULL);
-	printw("%4"PRId64, cur_number);
+	printw("%4"PRId64, cur_number[live]);
 	addch(seek_cmd);
 	addch(atomic_load_lax(&paused) ? '.' : '>');
 
