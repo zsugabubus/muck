@@ -14,49 +14,44 @@ muck \- music player
 is a terminal music player built on top of FFmpeg.
 .
 .PP
-When
-.IR URL s
-are given, they are used to populate
 .B master
-playlist.
-.PP
+playlist is populated with the given
+.IR URL s.
 When no URLs are given and standard input does not refer to a terminal, a
 special
 .B stdin
 playlist is created and playlist file is read from the standard input.
-.PP
 Otherwise a
 .B \.
 playlist is created and files are read from the current directory.
 .
 .SS Playlists
 .PP
-Files ending in
+URLs ending in
 .RB {\  .m3u " | " .m3u8 " | " .pl " }[ " .bz " | " .bz2 " | " .gz " | " .lz4 " | " .xz " | " .zst \ ]
 are treated as (compressed) playlist files.
 .PP
-If file starts with
+Playlist files that start with
 .BR #EXTM3U ,
-it is recognized as an M3U playlist and for every media URL metadata is
-written to and read from
+are recognized as M3U playlists and for every media URL metadata is
+written to and read from the
 .BR #EXTINF \ directive.
 Playlists containing unknown comments are marked read-only thus never
 overwritten.
 .PP
 .BI #PLAYLIST: NAME
-directive can be used to provide a pretty name for a playlist (instead of
+directive can be used to give a pretty name for a playlist (instead of
 referencing to it by its path).
 .PP
-Playlists are opened only once, immediately after startup and may be nested
-without limits.
+Playlists are opened once at startup and may be nested without limits.
 .PP
 Directories are treated like a virtual playlist with the limitation that they
 are recognized on the command-line only, i.e. they are neither scanned
-recursively nor can be played from a playlist. If you would like to overcome
-this limitation, use
-.BR "find | muck" .
+recursively nor can be played from inside a playlist. If you would like to
+overcome this limitation, use
+.BR "find -type f | muck" .
 .
-.SS "Cover art"
+.SS Cover art
 Cover art is written to
 .RB $ MUCK_COVER .
 If not set, a suitable location is chosen.
@@ -113,14 +108,16 @@ Specify column layout. Default:
 .IP
 .TS
 tab(|)[allbox];
-ll.
-\fIMODIFIER\fR|Description
+lil
+ll
+lbl.
+MODIFIER|Description
 \[u2423]|Join with " ".
-\fB*\fR|Make column flexible. \fIWIDTH\fR specifies minimum width.
-\fB+\fR|Wrap in " (\[u2026])".
-\fB,\fR|Join with ";".
-\fB-\fR|Join with " - ".
-\fB/\fR|Join with " / ".
+*|Make column flexible. \fIWIDTH\fR specifies minimum width.
++|Wrap in " (\[u2026])".
+,|Join with ";".
+-|Join with " - ".
+/|Join with " / ".
 .TE
 .IP
 .I WIDTH
@@ -137,7 +134,7 @@ available in search mode.
 Print version information and exit.
 .
 .SH KEYBINDINGS
-.SS "Live mode"
+.SS Live mode
 .TP
 .BR 0-9
 Set
@@ -155,6 +152,15 @@ Seek to
 .IR N "th (default: 1) next file."
 .
 .TP
+.BR s
+Seek to
+.IR N "th (default: 0) file."
+.
+.TP
+.BR r
+Seek to a random file (other than the currently playing file).
+.
+.TP
 .BR g ,\  Home
 Seek to
 .IR N "=MMSS (default: 0)."
@@ -170,25 +176,32 @@ Seek to
 in the file.
 .
 .TP
-.BR s
-Seek to
-.IR N "th (default: 0) file."
-.
-.TP
-.BR r
-Seek to a random file (other than the currently playing file).
-.
-.TP
-.BR Return
-Seek again.
-.
-.TP
 .BR j ,\  k
 Seek by 5% but at least 5 seconds.
 .
 .TP
 .BR h ,\  l ,\  Left ,\  Right
 Seek by 5 seconds.
+.
+.TP
+.BR Return
+Seek again. Seek command to be repeated is displayed in the status line.
+.
+.TP
+.BR + ,\  \-
+Change
+.B volume
+property of
+.B volume
+filter by +1% and -2%, respectively.
+.
+.TP
+.BR *
+Set volume to
+.I N
+if given, otherwise toggle mute. Uses
+.B volume
+filter.
 .
 .TP
 .BR .
@@ -203,46 +216,29 @@ Unpause playback.
 Toggle pause playback.
 .
 .TP
-.B M
-Dump detailed metadata information about currently playing file into messages.
-.
-.TP
 .BR / ,\  =
 Search. Further help is part of the search screen.
 .
 .TP
-.BR + ,\ \-
-Change
-.B volume
-property of
-.B volume
-filter by +1% and -2% respectively.
+.B |
+Print files to standard output.
 .
 .TP
-.BR *
-Toggle mute. Uses
-.B volume
-filter.
+.B v
+Switch between live and visual modes. Live mode is the default.
 .
 .TP
 .BR H ,\  L ,\  Shift+Left ,\  Shift+Right
 Scroll file list horizontally.
 .
 .TP
-.B v
-Switch between
-.B live
-and
-.B visual
-modes. Live mode is the default.
-.
-.TP
-.B m
-Show messages.
-.
-.TP
 .B w
-Toggle column widening. Narrow columns (\[<=]10 cells) are ignored.
+Toggle column widening. Ignore narrow columns (\[<=]10 cells).
+.
+.TP
+.B M
+Dump detailed metadata information about currently playing file to standard
+error.
 .
 .TP
 .BR Ctrl+L
@@ -264,9 +260,9 @@ Execute
 .RB $ MUCK_ *
 environment variables are set, based on the currently playing file.
 .
-.SS "Visual mode"
+.SS Visual mode
 .TP
-.BR p ,\  N ,\  Up ,\  n ,\  Down ,\  g ,\  Home ,\  G ,\  End ,\  s ,\  r ,\  / ,\  =
+.BR p ,\  Down ,\  N ,\  n ,\  Up ,\  s ,\  r ,\  / ,\  =
 Same as in live mode but do not start playing.
 .
 .TP
@@ -275,7 +271,17 @@ Start playing current file.
 .
 .TP
 .BR j ,\  k
-Move selection.
+Move selection by
+.I N
+(default: 1).
+.
+.TP
+.BR g ,\  Home
+Go to top.
+.
+.TP
+.BR G ,\  End
+Go to bottom.
 .
 .TP
 (other)
@@ -292,33 +298,39 @@ Configuration home.
 .IP
 Always set for children.
 .
-.SH EXAMPLE
+.SH EXAMPLES
 .
-.IP \(bu
-Read files from arguments:
-.sp
+Read files from arguments.
+.IP
 .EX
-$ muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
+muck i-scream.flac http://online-screams.com:8008/radio ~/Music ~/Downloads
 .EE
 .
-.IP \(bu
-Read playlist file from standard input:
-.sp
+.P
+Read playlist from standard input.
+.IP
 .EX
-$ muck <<"PLAYLIST"
+muck <<"PLAYLIST"
 #EXTM3U
 #EXTINF:title="foobar",
 # This is my favourite song:
 i-scream.flac
 http://online-screams.com:8008/radio
-~/mus
-~/Music
+/home/user/Music
+/home/user/Downloads
 PLAYLIST
 .EE
 .
+.P
+Start random playing matching files with decreased volume.
+.IP
+.EX
+muck -q '~"b u g"' -e '80*r'
+.EE
+.
 .SH "SEE ALSO"
-.BR ffmpeg (1)
-.BR ffplay (1)
+.BR ffmpeg (1),
+.BR ffplay (1),
 .BR pcre2syntax (1)
 .
 .SH AUTHORS
