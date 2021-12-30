@@ -4569,8 +4569,7 @@ static void
 handle_sigcont(int sig)
 {
 	(void)sig;
-	endwin();
-	refresh();
+	do_key(CONTROL('L'));
 }
 
 static void
