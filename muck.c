@@ -65,6 +65,8 @@ strchrnul(char const *s, char c)
 }
 #endif
 
+#define FFMINMAX(min, x, max) FFMAX(min, FFMIN(x, max))
+
 #define ARRAY_SIZE(x) (sizeof x / sizeof *x)
 
 #define PTR_INC(pp, n) (pp) = (void *)((char *)(pp) + (n))
@@ -685,7 +687,8 @@ append_file(Playlist *parent, enum FileType type)
 	if ((new_files_size ^ parent->files_size) > parent->files_size) {
 		void *p = realloc(parent->files, new_files_size * 2);
 		if (!p) {
-			print_file_strerror(parent->parent, &parent->a, "Could not append file to playlist");
+			print_file_strerror(parent->parent, &parent->a,
+					"Could not append file to playlist");
 			exit(EXIT_FAILURE);
 		}
 		void *old_files = parent->files;
@@ -695,7 +698,8 @@ append_file(Playlist *parent, enum FileType type)
 		if (old_files != parent->files)
 			for_each_playlist(child_playlist, parent)
 				for_each_playlist(grandchild_playlist, child_playlist)
-					PTR_INC(grandchild_playlist->parent, (char *)parent->files - (char *)old_files);
+					PTR_INC(grandchild_playlist->parent,
+							(char *)parent->files - (char *)old_files);
 	}
 
 	AnyFile *a = (void *)((char *)parent->files + parent->files_size);
@@ -1067,23 +1071,23 @@ reap(pid_t pid, char const *program)
 }
 
 static void
-compress_playlist(Playlist *playlist, int *pfd, pid_t *ppid, char const **pprogram, int do_compress)
+compress_playlist(Playlist *playlist, int *pfd, pid_t *pid, char const **program, int do_compress)
 {
 	int pipes[2] = { -1, -1 };
 
-	*pprogram = probe_compressor(playlist->a.url);
+	*program = probe_compressor(playlist->a.url);
 
 	pipe2(pipes, O_CLOEXEC);
 
-	if ((*ppid = fork()) < 0) {
+	if ((*pid = fork()) < 0) {
 		print_file_strerror(playlist->parent, &playlist->a,
 				do_compress
 					? "Could not compress playlist"
 					: "Could not decompress playlist");
-	} else if (!*ppid) {
+	} else if (!*pid) {
 		if (dup2(do_compress ? pipes[0] : *pfd, STDIN_FILENO) < 0 ||
 		    dup2(do_compress ? *pfd : pipes[1], STDOUT_FILENO) < 0 ||
-		    execlp(*pprogram, *pprogram, "-c", do_compress ? NULL : "-d", NULL) < 0)
+		    execlp(*program, *program, "-c", do_compress ? NULL : "-d", NULL) < 0)
 			print_file_strerror(playlist->parent, &playlist->a,
 					do_compress
 						? "Could not compress playlist"
@@ -1681,7 +1685,8 @@ open_input(Input *in)
 		if ((AV_DISPOSITION_ATTACHED_PIC & stream->disposition) &&
 		    AVMEDIA_TYPE_VIDEO == stream->codecpar->codec_type)
 		{
-			AVDictionaryEntry const *title = av_dict_get(stream->metadata, "comment", NULL, 0);
+			AVDictionaryEntry const *title;
+			title = av_dict_get(stream->metadata, "comment", NULL, 0);
 			if (!title)
 				title = av_dict_get(stream->metadata, "MATROSKA/TITLE", NULL, 0);
 			if (!title || strcasecmp(title->value, "Cover (front)"))
@@ -1724,7 +1729,8 @@ open_input(Input *in)
 	/* Initialize the stream parameters with demuxer information. */
 	rc = avcodec_parameters_to_context(in->s.codec_ctx, in->s.audio->codecpar);
 	if (rc < 0) {
-		print_file_averror(playlist, &f->a, "Could not initalize codec parameters", rc);
+		print_file_averror(playlist, &f->a,
+				"Could not initalize codec parameters", rc);
 		return;
 	}
 
@@ -1785,7 +1791,8 @@ print_stream(char **pbuf, int *pn, Stream const *s, int output)
 	if (AV_CH_LAYOUT_STEREO != s->codec_ctx->channel_layout) {
 		sbprintf(pbuf, pn, ", ");
 		av_get_channel_layout_string(*pbuf, *pn,
-				s->codec_ctx->channels, s->codec_ctx->channel_layout);
+				s->codec_ctx->channels,
+				s->codec_ctx->channel_layout);
 		int k = strlen(*pbuf);
 		*pbuf += k;
 		*pn -= k;
@@ -1821,9 +1828,12 @@ configure_graph(AVBufferSrcParameters *pars)
 
 	AVFilterContext *format_ctx;
 
-	if (!(buffer_ctx = avfilter_graph_alloc_filter(graph, avfilter_get_by_name("abuffer"), "src")) ||
-	    !(format_ctx = avfilter_graph_alloc_filter(graph, avfilter_get_by_name("aformat"), "aformat")) ||
-	    !(buffersink_ctx = avfilter_graph_alloc_filter(graph, avfilter_get_by_name("abuffersink"), "sink")))
+	if (!(buffer_ctx = avfilter_graph_alloc_filter(graph,
+			avfilter_get_by_name("abuffer"), "src")) ||
+	    !(format_ctx = avfilter_graph_alloc_filter(graph,
+			avfilter_get_by_name("aformat"), "aformat")) ||
+	    !(buffersink_ctx = avfilter_graph_alloc_filter(graph,
+			avfilter_get_by_name("abuffersink"), "sink")))
 		goto fail_enomem;
 
 	av_buffersrc_parameters_set(buffer_ctx, pars);
@@ -1859,13 +1869,14 @@ configure_graph(AVBufferSrcParameters *pars)
 	sink_end->name = av_strdup("out");
 	sink_end->filter_ctx = format_ctx;
 
-	if ((rc = avfilter_link(sink_end->filter_ctx, 0, buffersink_ctx, 0)) < 0) {
+	rc = avfilter_link(sink_end->filter_ctx, 0, buffersink_ctx, 0);
+	if (rc < 0) {
 		error_msg = "Could not create link";
 		goto out;
 	}
 
 	rc = avfilter_graph_parse_ptr(graph, graph_descr,
-				&sink_end, &src_end, NULL);
+			&sink_end, &src_end, NULL);
 	if (rc < 0) {
 		error_msg = "Could not parse filtergraph";
 		goto out;
@@ -1929,7 +1940,8 @@ configure_output(AVFrame const *frame)
 
 	int rc;
 
-	rc = avformat_alloc_output_context2(&out.format_ctx, NULL, oformat_name, ofilename);
+	rc = avformat_alloc_output_context2(&out.format_ctx, NULL,
+			oformat_name, ofilename);
 	if (rc < 0) {
 		print_averror("Could not allocate output", rc);
 		goto fail;
@@ -2037,7 +2049,8 @@ get_parent(Playlist const *ancestor, AnyFile const *a)
 enum { FILE_METADATA_BUFSZ = 20, };
 
 static char const *
-get_metadata(Playlist const *playlist, File const *f, enum MetadataX m, char buf[FILE_METADATA_BUFSZ])
+get_metadata(Playlist const *playlist, File const *f, enum MetadataX m,
+		char buf[FILE_METADATA_BUFSZ])
 {
 	if (m < (enum MetadataX)M_NB)
 		return f->metadata[m] ? f->a.url + f->metadata[m] : NULL;
@@ -2091,6 +2104,59 @@ expr_strtou64(char const *s, uint64_t *ret)
 }
 
 static int
+expr_eval_kv_key(Expr const *expr, enum MetadataX m, ExprEvalContext const *ctx)
+{
+	char mbuf[FILE_METADATA_BUFSZ];
+	char const *value = get_metadata(ctx->pf.p, ctx->pf.f, m, mbuf);
+
+	/* Fallback to the URL if metadata is missing for this
+	 * file. This way user can avoid nasty queries in a new
+	 * playlist. */
+	if (!value &&
+	    !(OP_ISSET & expr->kv.op) &&
+	    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
+	    !ctx->pf.f->metadata[M_length])
+		value = ctx->pf.f->a.url;
+	else if (!value)
+		return 0;
+
+	if (OP_RE & expr->kv.op) {
+		for (char const *s = value;;) {
+			char *end = strchrnul(s, ';');
+
+			int rc = pcre2_match(expr->kv.re,
+					(uint8_t const *)s,
+					end - s,
+					0, 0, ctx->match_data, NULL);
+			if (0 <= rc)
+				return 1;
+			assert(PCRE2_ERROR_NOMATCH == rc);
+
+			if (!*end)
+				return 0;
+			s = end + 1;
+		}
+	} else {
+		char const *s = value;
+		for (uint8_t i = 0;;) {
+			if (expr->kv.nnums <= i)
+				return 1;
+
+			uint64_t vn;
+			if (!(s = expr_strtou64(s, &vn)))
+				return 0;
+
+			uint64_t n = expr->kv.nums[i++];
+			enum KeyOp rel = OP_LT << ((vn > n) - (vn < n) + 1);
+			if (rel & ~OP_EQ & expr->kv.op)
+				return 1;
+			if (rel & ((OP_LT | OP_EQ | OP_GT) ^ expr->kv.op))
+				return 0;
+		}
+	}
+}
+
+static int
 expr_eval(Expr const *expr, ExprEvalContext const *ctx)
 {
 	if (!expr)
@@ -2111,55 +2177,8 @@ expr_eval(Expr const *expr, ExprEvalContext const *ctx)
 			enum MetadataX m = __builtin_ctz(keys);
 			keys ^= UINT64_C(1) << m;
 
-			char buf[FILE_METADATA_BUFSZ];
-			char const *value = get_metadata(ctx->pf.p, ctx->pf.f, m, buf);
-
-			/* Fallback to the URL if metadata is missing for this
-			 * file. This way user can avoid nasty queries in a new
-			 * playlist. */
-			if (!value &&
-			    !(OP_ISSET & expr->kv.op) &&
-			    (METADATA_IN_URL & (UINT64_C(1) << m)) &&
-			    !ctx->pf.f->metadata[M_length])
-				value = ctx->pf.f->a.url;
-			else if (!value)
-				continue;
-
-			if (OP_RE & expr->kv.op) {
-				for (char const *start = value;;) {
-					char *end = strchrnul(start, ';');
-
-					int rc = pcre2_match(expr->kv.re,
-							(uint8_t const *)start,
-							end - start,
-							0, 0, ctx->match_data, NULL);
-					if (0 <= rc)
-						return 1;
-					assert(PCRE2_ERROR_NOMATCH == rc);
-
-					if (!*end)
-						break;
-					start = end + 1;
-				}
-			} else {
-				char const *v = value;
-
-				for (uint8_t i = 0;;) {
-					if (expr->kv.nnums <= i)
-						return 1;
-
-					uint64_t vn;
-					if (!(v = expr_strtou64(v, &vn)))
-						break;
-
-					uint64_t n = expr->kv.nums[i++];
-					enum KeyOp rel = OP_LT << ((vn > n) - (vn < n) + 1);
-					if (rel & ~OP_EQ & expr->kv.op)
-						return 1;
-					if (rel & ((OP_LT | OP_EQ | OP_GT) ^ expr->kv.op))
-						break;
-				}
-			}
+			if (expr_eval_kv_key(expr, m, ctx))
+				return 1;
 		}
 		return 0;
 
@@ -2227,7 +2246,8 @@ expr_parse_kv(ExprParserContext *parser)
 	       ('A' <= *parser->ptr && *parser->ptr <= 'Z'))
 	{
 		char const *p;
-		if (!(p = memchr(METADATA_LETTERS, *parser->ptr, sizeof METADATA_LETTERS))) {
+		p = memchr(METADATA_LETTERS, *parser->ptr, sizeof METADATA_LETTERS);
+		if (!p) {
 			parser->error_msg = "Unknown key";
 			goto fail;
 		}
@@ -2637,8 +2657,7 @@ get_current_pf(void)
 static AnyFile *
 get_playlist_start(Playlist const *playlist, int dir)
 {
-	return (void *)((char *)playlist->files + (
-		0 <= dir
+	return (void *)((char *)playlist->files + (0 <= dir
 			? 0
 			: playlist->files_size - get_file_size(playlist->last_child_type)
 	));
@@ -2657,7 +2676,8 @@ static int64_t const POS_RND = INT64_MIN;
  * seeking. */
 /* TODO: Append current entry to playlist named ".history". */
 static PlaylistFile
-seek_playlist_raw(Playlist const *root_playlist, uint8_t filter_index, PlaylistFile const *cur, int64_t pos, int whence)
+seek_playlist_raw(Playlist const *root_playlist, uint8_t filter_index,
+		PlaylistFile const *cur, int64_t pos, int whence)
 {
 	Playlist const *playlist = root_playlist;
 	uint64_t max = playlist->child_filter_count[filter_index];
@@ -2757,7 +2777,8 @@ task_worker(void *arg)
 
 #if HAVE_PTHREAD_SETNAME_NP
 	char name[16];
-	snprintf(name, sizeof name, "muck/worker%zu", (size_t)(worker - worker->task->workers));
+	snprintf(name, sizeof name, "muck/worker%zu",
+			(size_t)(worker - worker->task->workers));
 	pthread_setname_np(pthread_self(), name);
 #endif
 
@@ -2773,7 +2794,7 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 	static long ncpus;
 	if (!ncpus) {
 		ncpus = sysconf(_SC_NPROCESSORS_ONLN);
-		ncpus = FFMAX(1, FFMIN(ncpus, ARRAY_SIZE(((FileTask *)0)->workers)));
+		ncpus = FFMINMAX(1, ncpus, ARRAY_SIZE(((FileTask *)0)->workers));
 	}
 
 	FileTask task;
@@ -2782,7 +2803,10 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 
 	task.remaining = master.child_filter_count[0];
 	if (1 < ncpus)
-		task.batch_size = FFMAX(BATCH_SIZE_MIN, FFMIN(task.remaining / ncpus, BATCH_SIZE_MAX));
+		task.batch_size = FFMINMAX(
+				BATCH_SIZE_MIN,
+				task.remaining / ncpus,
+				BATCH_SIZE_MAX);
 	else
 		task.batch_size = task.remaining;
 	task.cur = seek_playlist_raw(&master, 0, NULL, 0, SEEK_SET);
@@ -2918,7 +2942,8 @@ match_file_post(Playlist *playlist, uint8_t filter_index)
 {
 	for_each_playlist(child, playlist) {
 		match_file_post(child, filter_index);
-		playlist->child_filter_count[filter_index] += child->child_filter_count[filter_index];
+		playlist->child_filter_count[filter_index] +=
+				child->child_filter_count[filter_index];
 	}
 }
 
@@ -3199,7 +3224,8 @@ source_worker(void *arg)
 			int old_level = av_log_get_level();
 			av_log_set_level(AV_LOG_DEBUG); /* <-- Not atomic. */
 			if (in0.s.format_ctx)
-				av_dump_format(in0.s.format_ctx, 0, in0.pf.f ? in0.pf.f->a.url : "(none)", 0);
+				av_dump_format(in0.s.format_ctx, 0,
+						in0.pf.f ? in0.pf.f->a.url : "(none)", 0);
 			av_log_set_level(old_level);
 			/* It is not an exchange. */
 			atomic_store_lax(&dump_in0, 0);
@@ -3293,10 +3319,14 @@ source_worker(void *arg)
 		if (unlikely((AVSTREAM_EVENT_FLAG_METADATA_UPDATED & in->s.format_ctx->event_flags))) {
 			in->s.format_ctx->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
 
-			AVDictionaryEntry const *t = av_dict_get(in->s.format_ctx->metadata, "StreamTitle", NULL, 0);
+			AVDictionaryEntry const *t;
+			t = av_dict_get(in->s.format_ctx->metadata,
+					"StreamTitle", NULL, 0);
 			if (t) {
 				char buf[20];
-				strftime(buf, sizeof buf, "%a %d %R", localtime(&(time_t){ time(NULL) }));
+				time_t now = time(NULL);
+				struct tm *tm = localtime(&now);
+				strftime(buf, sizeof buf, "%a %d %R", tm);
 				fprintf(fmsg, "%s ICY: %s\n", buf, t->value);
 			}
 		}
@@ -3427,13 +3457,19 @@ sink_worker(void *arg)
 		}
 
 		int desired_volume = atomic_load_lax(&volume);
+		if (desired_volume < 0)
+			desired_volume = 0;
 		if (unlikely(graph_volume_volume != desired_volume)) {
 			graph_volume_volume = desired_volume;
 
+			double farg = pow(desired_volume / 100., M_E);
 			char arg[50];
-			snprintf(arg, sizeof arg, "%f",
-					pow((desired_volume <= 0 ? 0 : desired_volume) / 100., M_E));
-			if (avfilter_graph_send_command(graph, "volume", "volume", arg, NULL, 0, 0) < 0) {
+			snprintf(arg, sizeof arg, "%f", farg);
+
+			rc = avfilter_graph_send_command(graph,
+					"volume", "volume",
+					arg, NULL, 0, 0);
+			if (rc < 0) {
 				if (!avfilter_graph_get_filter(graph, "volume"))
 					print_error("Cannot find 'volume' filter");
 				print_error("Could not set volume");
@@ -3449,10 +3485,14 @@ sink_worker(void *arg)
 
 		frame->pts = out_dts;
 		frame->pkt_dts = out_dts;
-		frame->pkt_duration = frame->nb_samples *
-			out.audio->time_base.den / frame->sample_rate / out.audio->time_base.num;
+		frame->pkt_duration =
+			frame->nb_samples
+			* out.audio->time_base.den
+			/ frame->sample_rate
+			/ out.audio->time_base.num;
 
-		rc = av_buffersrc_add_frame_flags(buffer_ctx, frame, AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
+		rc = av_buffersrc_add_frame_flags(buffer_ctx, frame,
+				AV_BUFFERSRC_FLAG_NO_CHECK_FORMAT);
 		if (unlikely(rc < 0))
 			print_averror("Could not push frame into filtergraph", rc);
 
@@ -3575,7 +3615,8 @@ open_visual_search(void)
 		return;
 
 	int any = 0;
-	for (size_t i = 0; i < ARRAY_SIZE(search_history) && search_history[i]; ++i) {
+	for (size_t i = 0; i < ARRAY_SIZE(search_history) && search_history[i]; ++i)
+	{
 		fprintf(stream, "%s\n", search_history[i]);
 		any = 1;
 	}
@@ -3608,9 +3649,9 @@ open_visual_search(void)
 	char const *home = getenv("HOME");
 	size_t home_size = strlen(home);
 	int tilde = !strncmp(history_path, home, home_size);
-	fprintf(stream,
-			"# %s%s:\n",
-			tilde ? "~" : "", history_path + (tilde ? home_size : 0));
+	fprintf(stream, "# %s%s:\n",
+			tilde ? "~" : "",
+			history_path + (tilde ? home_size : 0));
 	if (history) {
 		char buf[BUFSIZ];
 		size_t buf_size;
@@ -3887,7 +3928,7 @@ do_key(int c)
 
 	switch (c) {
 	case '*':
-		atomic_store_lax(&volume, '0' == number_cmd ? cur_number[live] : -volume);
+		atomic_store_lax(&volume, get_number(-volume));
 		notify_event(EVENT_STATE_CHANGED);
 		break;
 
@@ -3897,7 +3938,7 @@ do_key(int c)
 		break;
 
 	case '-':
-		atomic_store_lax(&volume, FFMAX(abs(volume) - 2, 0));
+		atomic_store_lax(&volume, FFMAX(0, abs(volume) - 2));
 		notify_event(EVENT_STATE_CHANGED);
 		break;
 
@@ -3993,7 +4034,7 @@ do_key(int c)
 
 	case 's': /* Set. */
 	{
-		int64_t n = '0' == number_cmd ? cur_number[live] : 0;
+		int64_t n = get_number(0);
 
 		if (live) {
 			/* Stay close to file, even if it fails to play. */
@@ -4026,7 +4067,8 @@ do_key(int c)
 			break;
 
 		PlaylistFile cur = get_current_pf();
-		PlaylistFile pf = seek_playlist(&master, &cur, cur_number[live] * dir, SEEK_CUR);
+		PlaylistFile pf = seek_playlist(&master, &cur,
+				cur_number[live] * dir, SEEK_CUR);
 		play_or_select_file(pf.f);
 	}
 		break;
@@ -4054,7 +4096,7 @@ do_key(int c)
 	case 'G': /* GO TO. */
 	case KEY_END:
 		if (live) {
-			int64_t n = '0' == number_cmd ? cur_number[live] : 100 * 3 / 8;
+			int64_t n = get_number(100 * 3 / 8);
 			seek_player(atomic_load_lax(&cur_duration) * n / 100, SEEK_SET);
 		} else {
 			sel = seek_playlist(&master, NULL, 0, SEEK_END).f;
@@ -4075,8 +4117,9 @@ do_key(int c)
 	case 'l':
 	case KEY_RIGHT:
 	{
-		int64_t n = '0' == number_cmd ? cur_number[live] : 5;
-		seek_player(n * ('h' == c || KEY_LEFT == c ? -1 : 1), SEEK_CUR);
+		int dir = 'h' == c || KEY_LEFT == c ? -1 : 1;
+		int64_t n = get_number(5);
+		seek_player(n * dir, SEEK_CUR);
 	}
 		break;
 
@@ -4085,13 +4128,11 @@ do_key(int c)
 	{
 		int dir = 'j' == c ? -1 : 1;
 		if (live) {
-			int64_t n = '0' == number_cmd
-				? cur_number[live]
-				: FFMAX(atomic_load_lax(&cur_duration) / 16, +5);
+			int64_t n = get_number(FFMAX(atomic_load_lax(&cur_duration) / 16, +5));
 			seek_player(n * dir, SEEK_CUR);
 		} else {
 			PlaylistFile cur = get_current_pf();
-			int64_t n = '0' == number_cmd ? cur_number[live] : 1;
+			int64_t n = get_number(1);
 			sel = seek_playlist(&master, &cur, n * -dir, SEEK_CUR).f;
 			notify_event(EVENT_FILE_CHANGED);
 		}
@@ -4156,51 +4197,8 @@ do_key(int c)
 		exit(EXIT_SUCCESS);
 
 	default:
-	{
-		if (!(' ' <= (unsigned)c && (unsigned)c <= '~'))
-			break;
-
-		PlaylistFile pf = get_current_pf();
-		struct timespec mtim_before = get_file_mtim(pf);
-
-		if (!spawn()) {
-			Playlist *playlist = pf.p;
-			File *f = pf.f;
-
-			if (playlist &&
-			    AT_FDCWD != playlist->dirfd &&
-			    fchdir(playlist->dirfd) < 0)
-			{
-				print_error("Could not change working directory");
-				_exit(EXIT_FAILURE);
-			}
-
-			if (F_FILE == f->a.type)
-				setenv("MUCK_PATH", f->a.url, 0);
-
-			char name[5 + sizeof *METADATA_NAMES] = "MUCK_";
-
-			for (enum MetadataX i = 0; i < MX_NB; ++i) {
-				memcpy(name + 5, METADATA_NAMES[i], sizeof *METADATA_NAMES);
-				char mbuf[FILE_METADATA_BUFSZ];
-				char const *value = get_metadata(playlist, f, i, mbuf);
-				if (value)
-					setenv(name, f->a.url + f->metadata[i], 0);
-			}
-
-			char exe[PATH_MAX];
-			snprintf(exe, sizeof exe, "%s/%c", config_home, c);
-			execl(exe, exe, pf.f->a.url, NULL);
-			print_error("No binding for '%c'", c);
-
-			_exit(EXIT_FAILURE);
-		}
-
-		struct timespec mtim_after = get_file_mtim(pf);
-
-		if (memcmp(&mtim_before, &mtim_after, sizeof mtim_before))
-			play_file(pf.f, atomic_load_lax(&cur_pts));
-	}
+		if (' ' <= c && c <= '~')
+			spawn_script(c);
 		break;
 
 	case KEY_FOCUS_IN:
@@ -4772,7 +4770,6 @@ main(int argc, char **argv)
 			xassert(!setenv("MUCK_COVER", cover_path, 1));
 		}
 	}
-
 
 	xassert(0 <= rnd_init(&rnd));
 
