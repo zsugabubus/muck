@@ -2390,7 +2390,7 @@ expr_parse_kv(ExprParserContext *parser)
 		if (magic_sp) {
 			if (sizeof buf - 1 /* NUL */ - 6 < buf_size)
 				goto fail_too_long;
-			memcpy(buf + buf_size, "[._ -]+", 6);
+			memcpy(buf + buf_size, "[._ -]", 6);
 			buf_size += 6;
 		} else {
 			if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
