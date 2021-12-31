@@ -3740,21 +3740,11 @@ open_visual_search(void)
 	}
 	fputc('\n', stream);
 
-	fprintf(stream,
+	fputs(
 "# SYNTAX\n"
 "# ======\n"
 "#\n"
-"# FIRST-LINE := EXPR\n"
-"# EXPR := [KEY]... [ \"?\" ] [ { \"<\" | \">\" }[ \"=\" ] | \"~\" ] [VALUE]\n"
-"# EXPR := EXPR \"&\" EXPR | EXPR EXPR\n"
-"# EXPR := EXPR \"|\" EXPR\n"
-"# EXPR := \"!\" EXPR\n"
-"# VALUE := QUOTED | WORD\n"
-"# QUOTED := \"'\" [ all characters - \"'\" ]... \"'\"\n"
-"# QUOTED := '\"' [ all characters - '\"' ]... '\"'\n"
-"# WORD := { all characters - \"'\", '\"', \" \", \"|\", \")\" } [ all characters - \" \", \"|\", \")\" ]...\n"
-"# KEY := {\n"
-			);
+"# KEY := {\n", stream);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
 		char mbuf[FILE_METADATA_BUFSZ];
 		char const *value = cur.f ? get_metadata(cur.p, cur.f, i, mbuf) : NULL;
@@ -3765,69 +3755,7 @@ open_visual_search(void)
 				METADATA_NAMES[i],
 				value ? value : "");
 	}
-	fprintf(stream,
-"# }\n"
-"#\n"
-"# If KEY is omitted it defaults to keys marked with \"+\".\n"
-"#   Example:\n"
-"#     ~love.*bugs\n"
-"#     'all star'\n"
-"#   Searches artist, title, url, codec, comment...\n"
-"#\n"
-"# When multiple KEYs are specified it matches when any of them is\n"
-"# matching.\n"
-"#   Example:\n"
-"#     ax^Don & tT~peace\n"
-"#   artist (a) or remixer (x) field starts with Don (case-sensitive) and\n"
-"#   title (t) album (T) contains \"peace\".\n"
-"#\n"
-"# \"~\" tests whether given PCRE (VALUE) matches metadata.\n"
-"# May be omitted since it is the default.\n"
-"#\n"
-"# \"<\", \">\" compares pairs of integers. All non-digits are ignored.\n"
-"#   Example:\n"
-"#     y<2001.02.03.\n"
-"#   Matches songs with y~'2000', y~'2000-04.10', y~'2001X02',\n"
-"#   y~'xyz 2001 abc 2/1'.\n"
-"#     y<=2001.02.03\n"
-"#   Also matches y='2001-02-03'\n"
-"#     o~flac o>44 \n"
-"#   High-resolution FLAC files.\n"
-"#\n"
-"# If VALUE is omitted it is taken from the currently playing file.\n"
-"# For KEYs with multiple occurences only the first one is considered.\n"
-"#   Example:\n"
-"#     T\n"
-"#     y A T\n"
-"#   Match tracks from the same album.\n"
-"#     A (same as: A~'Good')\n"
-"#   With currently playing having A='Good;Bad;Ugly'.\n"
-"#\n"
-"# VALUE is matched caseless unless it contains uppercase letter.\n"
-"#   Example:\n"
-"#     t~ear (case-insensitive)\n"
-"#     t~Ear (case-sensitive)\n"
-"#   Both match songs named 'Ear' but only the first one matches 'Heart'.\n"
-"#\n"
-"# If file has no tags, KEYs marked with \"+\" match VALUE against URL.\n"
-"# This behavior can be avoided by \"?\".\n"
-"#   Example:\n"
-"#     a~jimmy t~sunshine\n"
-"#   For unscanned files both 'jimmy' and 'sunshine' are searched in URL,\n"
-"#   thus it will match appropriately named files, e.g. 'Jimmy - Sunshine.mp3'.\n"
-"#     a?jimmy\n"
-"#   May return nothing.\n"
-"#     n?.\n"
-"#   Use \".\" (match any) after \"?\" to test whether key is set.\n"
-"#\n"
-"# Between expressions \"!\", \"&\", \"|\" can be used to express\n"
-"# negation, and and or operations, respectively. \"&\" is the default so it\n"
-"# can be omitted. \"(\", \")\" can be used for grouping.\n"
-"#   Example:\n"
-"#     !(g~rock y<2000)\n"
-"#   All but rock before 2000.\n"
-"#\n"
-			);
+	fputs("# }\n", stream);
 
 	fclose(stream);
 
