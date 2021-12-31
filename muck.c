@@ -4466,7 +4466,7 @@ draw_files(void)
 				char mbuf[FILE_METADATA_BUFSZ];
 				char const *s = get_metadata(pos.p, pos.f, c->mx, mbuf);
 				if (!c->mod) {
-					if (x) {
+					if (x && s) {
 						int curx = getcurx(stdscr);
 						if (x - 1 < curx) {
 							move(line, x - 1);
