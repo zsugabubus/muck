@@ -1839,11 +1839,15 @@ configure_graph(AVBufferSrcParameters *pars)
 	av_buffersrc_parameters_set(buffer_ctx, pars);
 
 	char buf[128];
-	av_get_channel_layout_string(buf, sizeof(buf), 0, out.codec_ctx->channel_layout);
-	xassert(0 <= av_opt_set(format_ctx, "channel_layouts", buf, AV_OPT_SEARCH_CHILDREN));
-	xassert(0 <= av_opt_set(format_ctx, "sample_fmts", av_get_sample_fmt_name(out.codec_ctx->sample_fmt), AV_OPT_SEARCH_CHILDREN));
+	av_get_channel_layout_string(buf, sizeof buf, 0, out.codec_ctx->channel_layout);
+	(void)av_opt_set(format_ctx, "channel_layouts", buf, AV_OPT_SEARCH_CHILDREN);
+
+	(void)av_opt_set(format_ctx, "sample_fmts",
+			av_get_sample_fmt_name(out.codec_ctx->sample_fmt),
+			AV_OPT_SEARCH_CHILDREN);
+
 	snprintf(buf, sizeof buf, "%d", out.codec_ctx->sample_rate);
-	xassert(0 <= av_opt_set(format_ctx, "sample_rates", buf, AV_OPT_SEARCH_CHILDREN));
+	(void)av_opt_set(format_ctx, "sample_rates", buf, AV_OPT_SEARCH_CHILDREN);
 
 	if ((rc = avfilter_init_str(buffer_ctx, NULL)) < 0 ||
 	    (rc = avfilter_init_str(format_ctx, NULL)) < 0 ||
