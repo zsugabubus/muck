@@ -464,8 +464,7 @@ static int sel_y, sel_x;
 static int scroll_x;
 static int widen;
 
-static FILE *tty, *fmsg;
-static char msg_path[PATH_MAX];
+static FILE *tty;
 static atomic_uchar ALIGNED_ATOMIC focused = 1;
 
 static char config_home[PATH_MAX];
@@ -497,13 +496,16 @@ get_playlist_name(Playlist const *playlist)
 static void
 print_error(char const *msg, ...)
 {
+	if (!stderr)
+		return;
+
 	va_list ap;
 	va_start(ap, msg);
-	flockfile(fmsg);
-	fputs("\033[1;31m", fmsg);
-	vfprintf(fmsg, msg, ap);
-	fputs("\033[m\n", fmsg);
-	funlockfile(fmsg);
+	flockfile(stderr);
+	fputs("\033[1;31m", stderr);
+	vfprintf(stderr, msg, ap);
+	fputs("\033[m\n", stderr);
+	funlockfile(stderr);
 	va_end(ap);
 }
 
@@ -752,15 +754,20 @@ append_file(Playlist *parent, enum FileType type)
 static void
 print_playlist_error(Playlist const *playlist, int color, char const *msg, size_t lnum, size_t col)
 {
-	fprintf(fmsg, "\033[1;%dm", color);
-	fputs(get_playlist_name(playlist), fmsg);
-	fputs(":", fmsg);
+	if (!stderr)
+		return;
+
+	flockfile(stderr);
+	fprintf(stderr, "\033[1;%dm", color);
+	fputs(get_playlist_name(playlist), stderr);
+	fputs(":", stderr);
 	if (lnum) {
-		fprintf(fmsg, "%zu:", lnum);
+		fprintf(stderr, "%zu:", lnum);
 		if (col)
-			fprintf(fmsg, "%zu:", col);
+			fprintf(stderr, "%zu:", col);
 	}
-	fprintf(fmsg, " %s\033[m\n", msg);
+	fprintf(stderr, " %s\033[m\n", msg);
+	funlockfile(stderr);
 }
 
 static void
@@ -1225,8 +1232,6 @@ save_playlist(Playlist *playlist)
 	    /* Not opened. */
 	    !playlist->files)
 		return;
-
-	fprintf(fmsg, "Saving %s...\n", playlist->a.url);
 
 	char tmp[PATH_MAX];
 
@@ -2920,19 +2925,6 @@ spawn(void)
 	return rc;
 }
 
-static void
-show_messages(void)
-{
-	fflush(fmsg);
-	if (!spawn()) {
-		char const *pager = getenv("PAGER");
-		if (!pager)
-			pager = "less";
-		execlp(pager, pager, "-rf", "-+ceEFX", "--", msg_path, NULL);
-		_exit(EXIT_FAILURE);
-	}
-}
-
 /* Reset match counts. */
 static void
 match_file_pre(Playlist *playlist, uint8_t filter_index)
@@ -3333,7 +3325,7 @@ source_worker(void *arg)
 				time_t now = time(NULL);
 				struct tm *tm = localtime(&now);
 				strftime(buf, sizeof buf, "%a %d %R", tm);
-				fprintf(fmsg, "%s ICY: %s\n", buf, t->value);
+				fprintf(stderr, "%s ICY: %s\n", buf, t->value);
 			}
 		}
 
@@ -3968,10 +3960,6 @@ do_key(int c)
 		do_wakeup(&wakeup_source, NULL);
 		break;
 
-	case 'm':
-		show_messages();
-		break;
-
 	case CONTROL('I'):
 		/* TODO: Switch show information / currently playing tabs. */
 		break;
@@ -4251,13 +4239,16 @@ log_cb(void *ctx, int level, char const *format, va_list ap)
 	if (av_log_get_level() < level)
 		return;
 
-	flockfile(fmsg);
+	if (!stderr)
+		return;
+
+	flockfile(stderr);
 	if (level <= AV_LOG_ERROR)
-		fputs("\033[1;31m", fmsg);
-	vfprintf(fmsg, format, ap);
+		fputs("\033[1;31m", stderr);
+	vfprintf(stderr, format, ap);
 	if (level <= AV_LOG_ERROR)
-		fputs("\033[m", fmsg);
-	funlockfile(fmsg);
+		fputs("\033[m", stderr);
+	funlockfile(stderr);
 }
 
 static void
@@ -4691,18 +4682,10 @@ main(int argc, char **argv)
 	setlocale(LC_ALL, "");
 
 	if (!(tty = fopen(ctermid(NULL), "w+e"))) {
-		fprintf(stderr, "Could not connect to TTY\n");
+		print_error("Could not connect to TTY");
 		exit(EXIT_FAILURE);
 	}
 	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
-
-	if (ssprintf(msg_path, "%s/muck.txt", getenv("XDG_RUNTIME_DIR")) < 0 ||
-	    !(fmsg = fopen(msg_path, "ae")))
-	{
-		fprintf(stderr, "Could not open messages file\n");
-		exit(EXIT_FAILURE);
-	}
-	xassert(0 <= setvbuf(fmsg, NULL, _IOLBF, 0));
 
 	atexit(bye);
 
@@ -4907,10 +4890,20 @@ main(int argc, char **argv)
 	else
 		play_file(seek_playlist(&master, NULL, 0, SEEK_SET).f, AV_NOPTS_VALUE);
 
+	/* Disconnect stderr unless redirected. */
+	{
+		struct stat st_stdout, st_stderr;
+		if (fstat(STDOUT_FILENO, &st_stdout) < 0 ||
+		    fstat(STDERR_FILENO, &st_stderr) < 0 ||
+		    (st_stdout.st_dev == st_stderr.st_dev &&
+		     st_stdout.st_ino == st_stderr.st_ino))
+			freopen("/dev/null", "w+", stderr);
+	}
+
 	/* TUI event loop. */
 	{
 		pthread_setname_np(pthread_self(), "muck/tty");
-		newterm(NULL, stderr, tty);
+		newterm(NULL, stdout, tty);
 		start_color();
 		use_default_colors();
 		cbreak();
