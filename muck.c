@@ -2378,7 +2378,7 @@ expr_parse_kv(ExprParserContext *parser)
 	size_t buf_size = 0;
 	char st = '"' == *p || '\'' == *p ? *p++ : '\0';
 
-	for (; '\\' == *p ? *++p : *p && (st ? st != *p : ' ' != *p && '|' != *p && ')' != *p); ++p) {
+	for (; *p && (st ? st != *p : ' ' != *p && '|' != *p && ')' != *p); ++p) {
 		unsigned magic_sp = 0;
 		if (' ' == *p) {
 			unsigned escaped = 0;
