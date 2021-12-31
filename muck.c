@@ -1344,18 +1344,45 @@ fdata_writef(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char 
 	va_list ap;
 
 	va_start(ap, format);
-	size_t size = UINT16_MAX - *fdata_size;
-	int n = vsnprintf(fdata + *fdata_size, size, format, ap);
+	size_t rem = UINT16_MAX - *fdata_size;
+	int n = vsnprintf(fdata + *fdata_size, rem, format, ap);
 	va_end(ap);
 
-	if (size <= (size_t)n)
+	if (rem <= (size_t)n)
 		return -1;
 	if (!n)
 		return 0;
 
 	tmpf->metadata[m] = *fdata_size;
-	fdata[*fdata_size + n] = '\0';
 	*fdata_size += n + 1 /* NUL */;
+
+	return 0;
+}
+
+static int
+fdata_write_basic(File *tmpf, char *fdata, size_t *fdata_size, Input const *in)
+{
+	File const *f = in->pf.f;
+
+	char buf[128];
+	av_get_channel_layout_string(buf, sizeof buf,
+			in->s.codec_ctx->channels,
+			in->s.codec_ctx->channel_layout);
+	int rc = fdata_writef(tmpf, fdata, fdata_size, M_codec,
+			"%s-%s-%d",
+			in->s.codec_ctx->codec->name,
+			buf,
+			in->s.codec_ctx->sample_rate / 1000);
+	if (rc < 0)
+		return rc;
+
+	/* Preserve. */
+	if (f->metadata[M_comment]) {
+		int rc = fdata_writef(tmpf, fdata, fdata_size, M_comment,
+				"%s", f->a.url + f->metadata[M_comment]);
+		if (rc < 0)
+			return rc;
+	}
 
 	return 0;
 }
@@ -1466,6 +1493,68 @@ eos:
 }
 
 static void
+read_stream_metadata(Input const *in)
+{
+	File *f = in->pf.f;
+
+	File tmpf;
+	char fdata[UINT16_MAX];
+
+	size_t url_size = strlen(f->a.url) + 1 /* NUL */;
+	size_t fdata_size = url_size;
+
+	for (enum Metadata i = 0; i < M_NB; ++i)
+		tmpf.metadata[i] = 0;
+
+	AVDictionaryEntry const *t;
+	AVDictionaryEntry const *t2;
+
+	/* Should not fail since it has been already stored. */
+	xassert(0 <= fdata_write_basic(&tmpf, fdata, &fdata_size, in));
+
+	t = av_dict_get(in->s.format_ctx->metadata,
+			"icy-name", NULL, 0);
+	if (!t || !*t->value)
+		t = av_dict_get(in->s.format_ctx->metadata,
+				"icy-url", NULL, 0);
+
+	t2 = av_dict_get(in->s.format_ctx->metadata,
+			"icy-description", NULL, 0);
+
+	(void)fdata_writef(&tmpf, fdata, &fdata_size,
+			M_artist, "%s%s%s",
+			t && *t->value ? t->value : f->a.url,
+			t2 && *t2->value ? " - " : "",
+			t2 && *t2->value ? t2->value : "");
+
+	t = av_dict_get(in->s.format_ctx->metadata,
+			"StreamTitle", NULL, 0);
+	if (t)
+		(void)fdata_writef(&tmpf, fdata, &fdata_size,
+				M_title, "%s", *t->value ? t->value : "(unknown)");
+
+	t = av_dict_get(in->s.format_ctx->metadata,
+			"icy-genre", NULL, 0);
+	if (t && *t->value)
+		(void)fdata_writef(&tmpf, fdata, &fdata_size,
+				M_genre, "%s", t->value);
+
+	void *p = malloc(fdata_size);
+	if (!p) {
+		print_error("Could not allocate memory");
+		return;
+	}
+
+	memcpy(p, f->a.url, url_size);
+	memcpy(p + url_size, fdata + url_size, fdata_size - url_size);
+
+	free(f->a.url);
+	f->a.url = p;
+
+	memcpy(f->metadata, tmpf.metadata, sizeof tmpf.metadata);
+}
+
+static void
 read_metadata(Input const *in)
 {
 	typedef struct {
@@ -1546,27 +1635,8 @@ read_metadata(Input const *in)
 				break;
 		}
 
-	{
-		char buf[128];
-		av_get_channel_layout_string(buf, sizeof buf,
-				in->s.codec_ctx->channels,
-				in->s.codec_ctx->channel_layout);
-		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_codec,
-				"%s-%s-%d",
-				in->s.codec_ctx->codec->name,
-				buf,
-				in->s.codec_ctx->sample_rate / 1000);
-		if (rc < 0)
-			goto fail_too_long;
-	}
-
-	/* Preserve. */
-	if (f->metadata[M_comment]) {
-		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_comment,
-				"%s", f->a.url + f->metadata[M_comment]);
-		if (rc < 0)
-			goto fail_too_long;
-	}
+	if (fdata_write_basic(&tmpf, fdata, &fdata_size, in) < 0)
+		goto fail_too_long;
 
 	if (!playlist->modified) {
 		for (enum Metadata i = 0; i < M_NB; ++i)
@@ -2810,7 +2880,7 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 
 	FileTask task;
 
-	xassert(0 <= pthread_mutex_init(&task.mutex, NULL));
+	xassert(!pthread_mutex_init(&task.mutex, NULL));
 
 	task.remaining = master.child_filter_count[0];
 	if (1 < ncpus)
@@ -2848,7 +2918,7 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 	while (task.workers <= --worker)
 		pthread_join(worker->thread, NULL);
 
-	xassert(0 <= pthread_mutex_destroy(&task.mutex));
+	xassert(!pthread_mutex_destroy(&task.mutex));
 
 	return !task.remaining ? 0 : (assert(rc < 0), rc);
 }
@@ -2858,7 +2928,7 @@ worker_get(FileTaskWorker *worker, PlaylistFile *cur)
 {
 	if (!worker->count) {
 		FileTask *task = worker->task;
-		xassert(0 <= pthread_mutex_lock(&task->mutex));
+		xassert(!pthread_mutex_lock(&task->mutex));
 
 		int64_t n = FFMIN(task->batch_size, task->remaining);
 		worker->cur = task->cur;
@@ -2866,7 +2936,7 @@ worker_get(FileTaskWorker *worker, PlaylistFile *cur)
 		task->remaining -= n;
 		task->cur = seek_playlist_raw(&master, 0, &task->cur, n, SEEK_CUR);
 
-		xassert(0 <= pthread_mutex_unlock(&task->mutex));
+		xassert(!pthread_mutex_unlock(&task->mutex));
 
 		if (!worker->count)
 			return 0;
@@ -3317,16 +3387,11 @@ source_worker(void *arg)
 		if (unlikely((AVSTREAM_EVENT_FLAG_METADATA_UPDATED & in->s.format_ctx->event_flags))) {
 			in->s.format_ctx->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
 
-			AVDictionaryEntry const *t;
-			t = av_dict_get(in->s.format_ctx->metadata,
-					"StreamTitle", NULL, 0);
-			if (t) {
-				char buf[20];
-				time_t now = time(NULL);
-				struct tm *tm = localtime(&now);
-				strftime(buf, sizeof buf, "%a %d %R", tm);
-				fprintf(stderr, "%s ICY: %s\n", buf, t->value);
-			}
+			xassert(!pthread_mutex_lock(&file_lock));
+			read_stream_metadata(in);
+			xassert(!pthread_mutex_unlock(&file_lock));
+
+			notify_event(EVENT_FILE_CHANGED);
 		}
 
 		/* Send read packet for decoding. */
