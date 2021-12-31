@@ -87,6 +87,9 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 #define atomic_load_lax(...) atomic_load_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_store_lax(...) atomic_store_explicit(__VA_ARGS__, memory_order_relaxed)
 
+#define ssprintf(buf, format, ...) \
+	((int)sizeof buf <= snprintf(buf, sizeof buf, format, __VA_ARGS__) ? -1 : 0)
+
 #define IS_SUFFIX(haystack, needle) \
 	(strlen(needle) <= haystack##_size && \
 	 !memcmp(haystack + haystack##_size - strlen(needle), needle, strlen(needle)) && \
@@ -1227,9 +1230,7 @@ save_playlist(Playlist *playlist)
 
 	char tmp[PATH_MAX];
 
-	int n = snprintf(tmp, sizeof tmp,
-			"%s~", playlist->a.url);
-	if ((int)sizeof tmp <= n)
+	if (ssprintf(tmp, "%s~", playlist->a.url) < 0)
 		goto fail_open;
 
 	int dirfd = playlist->parent ? playlist->parent->dirfd : AT_FDCWD;
@@ -1598,7 +1599,8 @@ static void
 update_cover(Input const *in)
 {
 	char tmp[PATH_MAX];
-	snprintf(tmp, sizeof tmp, "%s~", cover_path);
+	if (ssprintf(tmp, "%s~", cover_path) < 0)
+		return;
 
 	int fd = open(tmp, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IRGRP);
 	if (fd < 0)
@@ -3593,26 +3595,33 @@ static FILE *
 open_tmpfile(char tmpname[PATH_MAX])
 {
 	char const *tmpdir = getenv("TMPDIR");
-	snprintf(tmpname, PATH_MAX, "%s/muckXXXXXX",
+	int n = snprintf(tmpname, PATH_MAX, "%s/muckXXXXXX",
 			tmpdir ? tmpdir : "/tmp");
-	int fd = mkostemp(tmpname, O_CLOEXEC);
-	if (fd < 0) {
-	fail:
-		print_strerror("Failed to create temporary file");
-		return NULL;
-	}
-
-	FILE *ret = fdopen(fd, "w");
-	if (!ret)
-		/* XXX: Does fd get closed? */
+	if (PATH_MAX <= n)
 		goto fail;
 
+	int fd = mkostemp(tmpname, O_CLOEXEC);
+	if (fd < 0)
+		goto fail;
+
+	FILE *ret = fdopen(fd, "w");
+	if (!ret) {
+		close(fd);
+		goto fail;
+	}
+
 	return ret;
+
+fail:
+	print_strerror("Failed to create temporary file");
+	return NULL;
 }
 
 static void
 open_visual_search(void)
 {
+	int rc;
+
 	char tmpname[PATH_MAX];
 	FILE *stream = open_tmpfile(tmpname);
 	if (!stream)
@@ -3647,23 +3656,31 @@ open_visual_search(void)
 	}
 
 	char history_path[PATH_MAX];
-	snprintf(history_path, sizeof history_path,
-			"%s/%s", config_home, "search-history");
-	FILE *history = fopen(history_path, "re");
+	rc = ssprintf(history_path, "%s/%s", config_home, "search-history");
+
 	char const *home = getenv("HOME");
 	size_t home_size = strlen(home);
 	int tilde = !strncmp(history_path, home, home_size);
 	fprintf(stream, "# %s%s:\n",
 			tilde ? "~" : "",
 			history_path + (tilde ? home_size : 0));
+
+	FILE *history;
+	if (0 <= rc) {
+		history = fopen(history_path, "re");
+	} else {
+		errno = ENAMETOOLONG;
+		history = NULL;
+	}
 	if (history) {
 		char buf[BUFSIZ];
 		size_t buf_size;
 		while (0 < (buf_size = fread(buf, 1, sizeof buf, history)))
 			fwrite(buf, 1, buf_size, stream);
 		fclose(history);
-	} else
+	} else {
 		fprintf(stream, "# %s.\n", strerror(errno));
+	}
 	fputc('\n', stream);
 
 	fprintf(stream,
@@ -3757,7 +3774,7 @@ open_visual_search(void)
 
 	fclose(stream);
 
-	int rc = spawn();
+	rc = spawn();
 	if (!rc) {
 		char const *editor = getenv("EDITOR");
 		execlp(editor, editor, "--", tmpname, NULL);
@@ -3888,8 +3905,8 @@ spawn_script(int c)
 		}
 
 		char exe[PATH_MAX];
-		snprintf(exe, sizeof exe, "%s/%c", config_home, c);
-		execl(exe, exe, pf.f->a.url, NULL);
+		if (0 <= ssprintf(exe, "%s/%c", config_home, c))
+			execl(exe, exe, pf.f->a.url, NULL);
 		print_error("No binding for '%c'", c);
 
 		_exit(EXIT_FAILURE);
@@ -4679,10 +4696,9 @@ main(int argc, char **argv)
 	}
 	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
 
-	snprintf(msg_path, sizeof msg_path,
-			"%s/muck.txt",
-			getenv("XDG_RUNTIME_DIR"));
-	if (!(fmsg = fopen(msg_path, "ae"))) {
+	if (ssprintf(msg_path, "%s/muck.txt", getenv("XDG_RUNTIME_DIR")) < 0 ||
+	    !(fmsg = fopen(msg_path, "ae")))
+	{
 		fprintf(stderr, "Could not open messages file\n");
 		exit(EXIT_FAILURE);
 	}
