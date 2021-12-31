@@ -2034,18 +2034,19 @@ get_parent(Playlist const *ancestor, AnyFile const *a)
 	return NULL;
 }
 
+enum { FILE_METADATA_BUFSZ = 20, };
+
 static char const *
-get_metadata(Playlist const *playlist, File const *f, enum MetadataX m)
+get_metadata(Playlist const *playlist, File const *f, enum MetadataX m, char buf[FILE_METADATA_BUFSZ])
 {
 	if (m < (enum MetadataX)M_NB)
 		return f->metadata[m] ? f->a.url + f->metadata[m] : NULL;
 	else switch (m) {
 	case MX_index:
-	{
-		static char buf[50];
-		sprintf(buf, "%"PRIu64, get_file_index((PlaylistFile){ (Playlist *)playlist, (File *)f }));
+		sprintf(buf, "%"PRIu64, get_file_index((PlaylistFile){
+			(Playlist *)playlist, (File *)f
+		}));
 		return buf;
-	}
 
 	case MX_url:
 		return f->a.url;
@@ -2110,7 +2111,8 @@ expr_eval(Expr const *expr, ExprEvalContext const *ctx)
 			enum MetadataX m = __builtin_ctz(keys);
 			keys ^= UINT64_C(1) << m;
 
-			char const *value = get_metadata(ctx->pf.p, ctx->pf.f, m);
+			char buf[FILE_METADATA_BUFSZ];
+			char const *value = get_metadata(ctx->pf.p, ctx->pf.f, m, buf);
 
 			/* Fallback to the URL if metadata is missing for this
 			 * file. This way user can avoid nasty queries in a new
@@ -2310,7 +2312,8 @@ expr_parse_kv(ExprParserContext *parser)
 			enum MetadataX m = __builtin_ctz(mxs);
 			mxs ^= UINT64_C(1) << m;
 
-			char const *value = get_metadata(cur.p, cur.f, m);
+			char mbuf[FILE_METADATA_BUFSZ];
+			char const *value = get_metadata(cur.p, cur.f, m, mbuf);
 			if (!value)
 				continue;
 
@@ -2764,8 +2767,8 @@ task_worker(void *arg)
 static int
 for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *arg)
 {
-	static const int64_t BATCH_SIZE_MIN = 16;
-	static const int64_t BATCH_SIZE_MAX = 256;
+	static int64_t const BATCH_SIZE_MIN = 16;
+	static int64_t const BATCH_SIZE_MAX = 256;
 
 	static long ncpus;
 	if (!ncpus) {
@@ -3581,19 +3584,22 @@ open_visual_search(void)
 	fputc('\n', stream);
 
 	PlaylistFile cur = get_current_pf();
-	for (enum MetadataX i = 0; i < MX_NB; ++i) {
-		char const *value = cur.f ? get_metadata(cur.p, cur.f, i) : NULL;
-		if (!value || !*value)
-			continue;
+	if (cur.f) {
+		for (enum MetadataX i = 0; i < MX_NB; ++i) {
+			char mbuf[FILE_METADATA_BUFSZ];
+			char const *value = get_metadata(cur.p, cur.f, i, mbuf);
+			if (!value || !*value)
+				continue;
 
-		fputc(METADATA_LETTERS[i], stream);
-		fputc('~', stream);
-		fputc('\'', stream);
-		fputs(value, stream);
-		fputc('\'', stream);
+			fputc(METADATA_LETTERS[i], stream);
+			fputc('~', stream);
+			fputc('\'', stream);
+			fputs(value, stream);
+			fputc('\'', stream);
+			fputc('\n', stream);
+		}
 		fputc('\n', stream);
 	}
-	fputc('\n', stream);
 
 	char history_path[PATH_MAX];
 	snprintf(history_path, sizeof history_path,
@@ -3631,7 +3637,8 @@ open_visual_search(void)
 "# KEY := {\n"
 			);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
-		char const *value = cur.f ? get_metadata(cur.p, cur.f, i) : NULL;
+		char mbuf[FILE_METADATA_BUFSZ];
+		char const *value = cur.f ? get_metadata(cur.p, cur.f, i, mbuf) : NULL;
 		fprintf(stream, "#  %c%c=%-*s%s\n",
 				METADATA_IN_URL & (UINT64_C(1) << i) ? '+' : ' ',
 				METADATA_LETTERS[i],
@@ -4113,7 +4120,8 @@ do_key(int c)
 
 			for (enum MetadataX i = 0; i < MX_NB; ++i) {
 				memcpy(name + 5, METADATA_NAMES[i], sizeof *METADATA_NAMES);
-				char const *value = get_metadata(playlist, f, i);
+				char mbuf[FILE_METADATA_BUFSZ];
+				char const *value = get_metadata(playlist, f, i, mbuf);
 				if (value)
 					setenv(name, f->a.url + f->metadata[i], 0);
 			}
@@ -4155,7 +4163,7 @@ do_keys(char const *s)
 }
 
 static void
-log_cb(void *ctx, int level, const char *format, va_list ap)
+log_cb(void *ctx, int level, char const *format, va_list ap)
 {
 	(void)ctx;
 
@@ -4376,14 +4384,15 @@ draw_files(void)
 		if (!pos.f->metadata[M_title]) {
 			char const *url = pos.f->a.url;
 			if (F_URL != pos.f->a.type)
-				url = get_metadata(pos.p, pos.f, MX_name);
+				url = get_metadata(pos.p, pos.f, MX_name, NULL);
 			addstr(url);
 			for (int curx = getcurx(stdscr); curx < COLS; ++curx)
 				addch(' ');
 		} else {
 			int x = 0;
 			for (c = defs; c < endc; ++c) {
-				char const *s = get_metadata(pos.p, pos.f, c->mx);
+				char mbuf[FILE_METADATA_BUFSZ];
+				char const *s = get_metadata(pos.p, pos.f, c->mx, mbuf);
 				if (!c->mod) {
 					if (x) {
 						int curx = getcurx(stdscr);
