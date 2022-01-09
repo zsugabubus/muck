@@ -1588,7 +1588,7 @@ read_metadata(Input const *in)
 		{ M_disc_total, "disc_total\0" },
 		{ M_featured_artist, "TRACK/FEATURED_ARTIST\0" },
 		{ M_genre, "genre\0" },
-		{ M_isrc, "TRACK/ISRC" "isrc\0" "TSRC\0" },
+		{ M_isrc, "TRACK/ISRC\0" "isrc\0" "TSRC\0" },
 		{ M_label, "ALBUM/LABEL\0" "label\0" },
 		{ M_title, "title\0" "tit1\0" },
 		{ M_track, "track\0" },
