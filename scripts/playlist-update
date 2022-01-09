@@ -1,3 +1,50 @@
-#!/usr/bin/sh
-playlist=${1:-playlist.m3u}
-find \( -false $(printf ' -o -name *.%s' mp0 mp3 flac wav alac mkv) \) -fprintf '%p\n'
+#!/bin/sh -eu
+# USAGE: $0 [PLAYLIST]
+#
+# Update PLAYLIST with files from playlist-list.
+
+PATH=${0%/*}:$PATH
+
+cat() {
+	case $1 in
+	-d) exec <&1 ;;
+	-c) exec 1<&0 ;;
+	esac
+}
+
+if test $# -eq 0; then
+	set -- playlist.m3u8*
+fi
+playlist=$1
+
+if ! test -f "$playlist"; then
+	printf >&2 'Cannot find playlist %s\n' "$playlist" $1
+fi
+
+case $playlist in
+*.gz) compress=gzip ;;
+*.bz|*.bz2)  compress=bzip2 ;;
+*.gz) compress=gzip ;;
+*.lz4) compress=lz4 ;;
+*.xz) compress=xz ;;
+*.zst) compress=zstd ;;
+*) compress=cat ;;
+esac
+
+cleanup() {
+	unlink "$add"
+	unlink "$update"
+}
+
+trap cleanup INT TERM EXIT
+
+add=$(mktemp)
+playlist-list >"$add"
+
+update=$(mktemp)
+$compress <"$playlist" >"$update" -d
+
+playlist-merge "$add" -- "$update" |
+$compress >".$playlist" -c
+
+ln -f ".$playlist" "$playlist"
