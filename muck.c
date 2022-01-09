@@ -1071,23 +1071,21 @@ find_playlist_by_mnemonic(Playlist *playlist, char c)
 }
 
 static void
-reap(pid_t pid, char const *program)
+reap(pid_t pid)
 {
 	int status;
 	xassert(0 <= waitpid(pid, &status, 0));
 
 	if (!(WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)))
-		print_error("Program %s terminated with failure", program);
+		print_error("Child process terminated with failure");
 }
 
 static void
-compress_playlist(Playlist *playlist, int *pfd, pid_t *pid, char const **program, int do_compress)
+compress_playlist(Playlist *playlist, int *playlist_fd, pid_t *pid, int do_compress)
 {
 	int pipes[2] = { -1, -1 };
 
-	*program = probe_compressor(playlist->a.url);
-
-	pipe2(pipes, O_CLOEXEC);
+	(void)pipe2(pipes, O_CLOEXEC);
 
 	if ((*pid = fork()) < 0) {
 		print_file_strerror(playlist->parent, &playlist->a,
@@ -1095,9 +1093,11 @@ compress_playlist(Playlist *playlist, int *pfd, pid_t *pid, char const **program
 					? "Could not compress playlist"
 					: "Could not decompress playlist");
 	} else if (!*pid) {
-		if (dup2(do_compress ? pipes[0] : *pfd, STDIN_FILENO) < 0 ||
-		    dup2(do_compress ? *pfd : pipes[1], STDOUT_FILENO) < 0 ||
-		    execlp(*program, *program, "-c", do_compress ? NULL : "-d", NULL) < 0)
+		char const *program = probe_compressor(playlist->a.url);
+
+		if (dup2(do_compress ? pipes[0] : *playlist_fd, STDIN_FILENO) < 0 ||
+		    dup2(do_compress ? *playlist_fd : pipes[1], STDOUT_FILENO) < 0 ||
+		    execlp(program, program, "-c", do_compress ? NULL : "-d", NULL) < 0)
 			print_file_strerror(playlist->parent, &playlist->a,
 					do_compress
 						? "Could not compress playlist"
@@ -1106,8 +1106,8 @@ compress_playlist(Playlist *playlist, int *pfd, pid_t *pid, char const **program
 	}
 
 	close(pipes[!do_compress]);
-	close(*pfd);
-	*pfd = pipes[do_compress];
+	close(*playlist_fd);
+	*playlist_fd = pipes[do_compress];
 }
 
 static void
@@ -1127,12 +1127,6 @@ read_file(Playlist *parent, AnyFile *a)
 	if (F_PLAYLIST == playlist->a.type ||
 	    F_PLAYLIST_COMPRESSED == playlist->a.type)
 	{
-		pid_t pid = -1;
-		char const *program;
-
-		if (F_PLAYLIST_COMPRESSED == playlist->a.type)
-			compress_playlist(playlist, &fd, &pid, &program, 0);
-
 		char *slash = strrchr(playlist->a.url, '/');
 		if (slash)
 			*slash = '\0';
@@ -1147,10 +1141,14 @@ read_file(Playlist *parent, AnyFile *a)
 		if (slash)
 			*slash = '/';
 
+		pid_t pid = -1;
+		if (F_PLAYLIST_COMPRESSED == playlist->a.type)
+			compress_playlist(playlist, &fd, &pid, 0);
+
 		read_playlist(playlist, fd);
 
 		if (0 <= pid)
-			reap(pid, program);
+			reap(pid);
 	} else if (F_PLAYLIST_DIRECTORY == playlist->a.type) {
 		read_playlist_directory(playlist, fd);
 	} else {
@@ -1233,57 +1231,70 @@ save_playlist(Playlist *playlist)
 	    !playlist->files)
 		return;
 
+	char const *error_msg = NULL;
 	char tmp[PATH_MAX];
-
-	if (ssprintf(tmp, "%s~", playlist->a.url) < 0)
-		goto fail_open;
+	*tmp = '\0';
+	int fd = -1;
+	FILE *stream = NULL;
+	pid_t pid = -1;
 
 	int dirfd = playlist->parent ? playlist->parent->dirfd : AT_FDCWD;
-	int fd = openat(dirfd, tmp, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, 0666);
-	if (fd < 0) {
-	fail_open:
-		print_file_strerror(playlist->parent, &playlist->a,
-				"Could not open temporary file");
+	if (ssprintf(tmp, "%s~", playlist->a.url) < 0 ||
+	    (fd = openat(dirfd, tmp, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, 0666)) < 0)
+	{
+		error_msg = "Could not open temporary playlist file";
 		return;
 	}
-
-	pid_t pid = -1;
-	char const *program;
 
 	if (F_PLAYLIST_COMPRESSED == playlist->a.type)
-		compress_playlist(playlist, &fd, &pid, &program, 1);
+		compress_playlist(playlist, &fd, &pid, 1);
 
-	FILE *stream = fdopen(fd, "w");
+	stream = fdopen(fd, "w");
 	if (!stream) {
-		print_file_strerror(playlist->parent, &playlist->a,
-				"Could not open playlist stream");
-		return;
+		error_msg = "Could not open playlist stream";
+		goto out;
 	}
+	fd = -1;
 
 	char buf[UINT16_MAX + 1];
 	setbuffer(stream, buf, sizeof buf);
 
 	write_playlist(playlist, stream);
 
-	fflush(stream);
-	if (ferror(stream)) {
-		print_file_strerror(playlist->parent, &playlist->a,
-				"Could not write playlist");
-		fclose(stream);
-		unlink(tmp);
-		return;
+	if (fflush(stream), ferror(stream)) {
+		error_msg = "Could not write playlist";
+		goto out;
 	}
-	fclose(stream);
 
-	if (0 <= pid)
-		reap(pid, program);
+	fclose(stream);
+	stream = NULL;
+
+	if (0 <= pid) {
+		reap(pid);
+		pid = -1;
+	}
 
 	if (renameat(dirfd, tmp, dirfd, playlist->a.url) < 0) {
-		unlink(tmp);
-		print_file_strerror(playlist->parent, &playlist->a,
-				"Could not replace existing playlist");
-		return;
+		error_msg = "Could not rename playlist";
+		goto out;
 	}
+	*tmp = '\0';
+
+out:
+	if (error_msg)
+		print_file_strerror(playlist->parent, &playlist->a, error_msg);
+
+	if (*tmp)
+		unlink(tmp);
+
+	if (0 <= fd)
+		close(fd);
+
+	if (stream)
+		fclose(stream);
+
+	if (0 <= pid)
+		reap(pid);
 }
 
 static void
@@ -1701,10 +1712,10 @@ update_cover(Input const *in)
 		data_size = sizeof DEFAULT_COVER;
 	}
 
-	(void)write(fd, data, data_size);
-	if (close(fd))
-		print_strerror("Could not write cover");
-	else if (rename(tmp, cover_path))
+	write(fd, data, data_size);
+	close(fd);
+
+	if (rename(tmp, cover_path))
 		print_strerror("Could not rename cover");
 }
 
@@ -2955,25 +2966,16 @@ spawn(void)
 	fputs(STOP_FOCUS_EVENTS, tty);
 	endwin();
 
-	pid_t pid;
-	if (!(pid = fork())) {
-		xassert(!dup2(fileno(tty), STDIN_FILENO));
+	/* Note that all signals are blocked so handlers do not have to be
+	 * reset. */
 
-		struct sigaction sa;
-		sigemptyset(&sa.sa_mask);
-
-		sa.sa_handler = SIG_DFL;
-
-		xassert(!sigaction(SIGCONT, &sa, NULL));
-		xassert(!sigaction(SIGWINCH, &sa, NULL));
-		xassert(!sigaction(SIGINT, &sa, NULL));
-		xassert(!sigaction(SIGHUP, &sa, NULL));
-		xassert(!sigaction(SIGTERM, &sa, NULL));
-		xassert(!sigaction(SIGQUIT, &sa, NULL));
-		xassert(!sigaction(SIGPIPE, &sa, NULL));
-		xassert(!sigaction(SIGRTMIN, &sa, NULL));
-
-		xassert(!pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL));
+	pid_t pid = fork();
+	if (!pid) {
+		pthread_setname_np(pthread_self(), "muck/child");
+		int tty_fd = fileno(tty);
+		xassert(0 <= dup2(tty_fd, STDIN_FILENO));
+		xassert(0 <= dup2(tty_fd, STDOUT_FILENO));
+		xassert(0 <= dup2(tty_fd, STDERR_FILENO));
 		return 0;
 	}
 
