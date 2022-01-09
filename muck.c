@@ -2242,7 +2242,7 @@ expr_eval_kv_key(Expr const *expr, enum MetadataX m, ExprEvalContext const *ctx)
 			enum KeyOp rel = OP_LT << ((vn > n) - (vn < n) + 1);
 			if (rel & ~OP_EQ & expr->kv.op)
 				return 1;
-			if (rel & ((OP_LT | OP_EQ | OP_GT) ^ expr->kv.op))
+			if (rel & ~expr->kv.op)
 				return 0;
 		}
 	}
@@ -3048,10 +3048,8 @@ search_file(char const *s)
 	live = old_live;
 
 	parser.match_data = pcre2_match_data_create(0, NULL);
-	if (!parser.match_data) {
-		parser.error_msg = "Out of memory";
+	if (!parser.match_data)
 		goto out;
-	}
 
 	parser.ptr = s;
 
