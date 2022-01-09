@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+
+import muck_playlist as M
+import unittest
+from unittest.mock import patch
+from importlib import reload
+from io import BytesIO, StringIO
+
+class TestPlaylistMethods(unittest.TestCase):
+	def tearDown(self):
+		reload(M)
+
+	@patch('os.path.isfile')
+	@patch('glob.iglob')
+	def test_read_files(self, mock_iglob, mock_isfile):
+		mock_iglob.return_value = [
+			'f1', 'f2',
+			'c.M3u', 'Cover.jpg', 'random.png'
+		]
+		mock_isfile.return_value = True
+
+		reload(M)
+
+		p = M.Playlist.read_dir('path/to/dir')
+		self.assertEqual(p.entries, [
+			M.PlaylistEntry('f1'),
+			M.PlaylistEntry('f2'),
+		])
+		self.assertEqual(p.basedir, 'path/to/dir')
+
+	@patch('os.path.isfile')
+	@patch('glob.iglob')
+	def test_read_dirs(self, mock_iglob, mock_isfile):
+		mock_iglob.return_value = ['d1', 'd2']
+		mock_isfile.return_value = False
+
+		reload(M)
+
+		p = M.Playlist.read_dir('path/to/dir')
+		self.assertEqual(len(p.entries), 0)
+		self.assertEqual(p.basedir, 'path/to/dir')
+
+	def test_read_m3u_plain(self):
+		f = StringIO(
+"""#EXTM3U
+#extrandom: junk
+#EXTINF:1,abraca
+#EXTINF:2,dabra
+./#d.mp3
+./d.flac
+#EXTINF:3,cabra
+c.mp3
+""")
+		f.name = 'path/to/playlist.mp3u'
+
+		p = M.Playlist.read_m3u(f)
+		self.assertEqual(p.entries, [
+			M.PlaylistEntry(url='#d.mp3', extinf='2,dabra'),
+			M.PlaylistEntry(url='d.flac'),
+			M.PlaylistEntry(url='c.mp3', extinf='3,cabra'),
+		])
+		self.assertEqual(p.basedir, 'path/to')
+
+	def test_update_extinf(self):
+		p = M.Playlist(
+			basedir='a',
+			entries=[
+				M.PlaylistEntry('1', extinf='old'),
+				M.PlaylistEntry('2', extinf='keep'),
+				M.PlaylistEntry('b/c/3', extinf='keep'),
+				M.PlaylistEntry('b/c/4', extinf='old'),
+				M.PlaylistEntry('b/c/5', extinf='old'),
+				M.PlaylistEntry('http://6', extinf='old'),
+				M.PlaylistEntry('7', extinf='keep'),
+				M.PlaylistEntry('/8', extinf='old'),
+			],
+		)
+		p.update_extinf([
+			M.Playlist(
+				basedir='a/b',
+				entries=[
+					M.PlaylistEntry('../1', extinf='update'),
+					M.PlaylistEntry('1', extinf='ignored'),
+					M.PlaylistEntry('c/4', extinf='new'),
+					M.PlaylistEntry('c/5', extinf='update'),
+					M.PlaylistEntry('/7', extinf='new'),
+				],
+			),
+			M.Playlist(
+				basedir='a/b/c',
+				entries=[
+					M.PlaylistEntry('./5', extinf='update again'),
+					M.PlaylistEntry('http://6', extinf='new'),
+					M.PlaylistEntry('/8', extinf='new'),
+				],
+			),
+		])
+
+		self.assertEqual(p.basedir, 'a')
+		self.assertEqual(p.entries, [
+			M.PlaylistEntry('1', extinf='update'),
+			M.PlaylistEntry('2', extinf='keep'),
+			M.PlaylistEntry('b/c/3', extinf='keep'),
+			M.PlaylistEntry('b/c/4', extinf='new'),
+			M.PlaylistEntry('b/c/5', extinf='update again'),
+			M.PlaylistEntry('http://6', extinf='new'),
+			M.PlaylistEntry('7', extinf='keep'),
+			M.PlaylistEntry('/8', extinf='new'),
+		])
+
+	def test_write(self):
+		f = BytesIO()
+		p = M.Playlist(
+			name='name',
+			basedir='root',
+			entries=[
+				M.PlaylistEntry('1', extinf='1'),
+				M.PlaylistEntry('2'),
+				M.PlaylistEntry('./3', extinf='3'),
+				M.PlaylistEntry('#4', extinf='4'),
+				M.PlaylistEntry('/5'),
+				M.PlaylistEntry('http://6'),
+			],
+		)
+		p.write(f)
+
+		self.assertEqual(f.getvalue().decode('utf-8'),
+"""
+#EXTM3U
+#PLAYLIST:name
+#EXTINF:1
+1
+2
+#EXTINF:3
+./3
+#EXTINF:4
+./#4
+/5
+http://6
+""".lstrip()
+		)
+
+
+if __name__ == '__main__':
+	unittest.main()

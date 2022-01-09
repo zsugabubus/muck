@@ -88,3 +88,10 @@ executable('muck',
 )
 
 install_man('muck.1')
+
+install_data('muck_playlist.py',
+	rename: 'muck-playlist',
+	install_mode: 'r-xr-xr-x',
+	install_dir: get_option('bindir')
+)
+test('test muck-playlist', find_program('test_muck_playlist'))
