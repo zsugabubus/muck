@@ -149,6 +149,7 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 	xmacro('C', catalog, 15, 0) \
 	xmacro('y', date, 10, 0) \
 	xmacro('o', codec, 18, 0) \
+	xmacro('O', cover_codec, 10, 0) \
 	xmacro('m', mtime, 10, 0) \
 	xmacro('l', length, 6, 0) \
 	xmacro('z', comment, 20, 0)
@@ -456,7 +457,7 @@ static File *seek_file0;
 static int64_t _Atomic seek_file_pts = AV_NOPTS_VALUE;
 static int64_t _Atomic seek_pts = AV_NOPTS_VALUE;
 
-static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCom*z";
+static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoOm*z";
 
 static char number_cmd[2];
 static int64_t cur_number[2];
@@ -1376,16 +1377,27 @@ fdata_write_basic(File *tmpf, char *fdata, size_t *fdata_size, Input const *in)
 	File const *f = in->pf.f;
 
 	char buf[128];
+	int rc;
 	av_get_channel_layout_string(buf, sizeof buf,
 			in->s.codec_ctx->channels,
 			in->s.codec_ctx->channel_layout);
-	int rc = fdata_writef(tmpf, fdata, fdata_size, M_codec,
+	rc = fdata_writef(tmpf, fdata, fdata_size, M_codec,
 			"%s-%s-%d",
 			in->s.codec_ctx->codec->name,
 			buf,
 			in->s.codec_ctx->sample_rate / 1000);
 	if (rc < 0)
 		return rc;
+
+	if (in->cover_front) {
+		AVCodecParameters *pars = in->cover_front->codecpar;
+		rc = fdata_writef(tmpf, fdata, fdata_size, M_cover_codec,
+				"%s-%d",
+				pars ? avcodec_get_name(pars->codec_id) : "unk",
+				pars ? pars->width : 0);
+		if (rc < 0)
+			return rc;
+	}
 
 	/* Preserve. */
 	if (f->metadata[M_comment]) {
