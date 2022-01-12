@@ -514,6 +514,30 @@ Start random playing matching files with decreased volume.
 muck -q '~"b u g"' -e '80*r'
 .EE
 .
+.P
+Print errors.
+.IP
+.EX
+muck 2>>/tmp/err
+.EE
+.
+.P
+An energy-efficient setup: Disable software volume and let ALSA talk directly
+to hardware. When run in an XTerm-compatible terminal emulator screen is not
+updated when unfocused.
+.IP
+.EX
+muck -f alsa -o hw -a anull -e Os
+.EE
+.
+.P
+Using together with
+.BR alsaequal .
+.IP
+.EX
+muck -f alsa -c pcm_f32le -a anull -e Os
+.EE
+.
 .SH "SEE ALSO"
 .BR ffmpeg (1),
 .BR ffplay (1),
