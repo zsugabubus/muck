@@ -4584,7 +4584,7 @@ draw_files(void)
 }
 
 static void
-draw_progress(void)
+draw_status_line(void)
 {
 	int64_t clock = atomic_load_lax(&cur_pts);
 	int64_t duration = atomic_load_lax(&cur_duration);
@@ -4689,7 +4689,7 @@ handle_signotify(int sig)
 			draw_files();
 
 		if ((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events)
-			draw_progress();
+			draw_status_line();
 
 		draw_cursor();
 		refresh();
