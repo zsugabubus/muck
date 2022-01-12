@@ -4802,7 +4802,7 @@ main(int argc, char **argv)
 
 	/* Setup ended, can load files now. */
 	char const *startup_cmd = NULL;
-	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:n:m:C:dv"));)
+	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:o:m:C:dv"));)
 		switch (c) {
 		case 'q':
 			search_history[0] = strdup(optarg);
@@ -4824,7 +4824,7 @@ main(int argc, char **argv)
 			oformat_name = optarg;
 			break;
 
-		case 'n':
+		case 'o':
 			ofilename = optarg;
 			break;
 
