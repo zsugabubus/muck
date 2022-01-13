@@ -3278,11 +3278,11 @@ source_worker(void *arg)
 		if (unlikely(atomic_load_lax(&seek_file0))) {
 			xassert(!pthread_mutex_lock(&file_lock));
 			/* Maybe deleted. */
-			if (likely(seek_file0)) {
+			if (likely(atomic_load_lax(&seek_file0))) {
 				close_input(&in0);
 
 				atomic_store_lax(&in0.pf.f, seek_file0);
-				seek_file0 = NULL;
+				atomic_store_lax(&seek_file0, NULL);
 				in0.pf.p = get_parent(&master, &in0.pf.f->a);
 
 				open_input(&in0);
