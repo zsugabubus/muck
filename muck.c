@@ -3293,6 +3293,7 @@ source_worker(void *arg)
 
 				/* Otherwise would be noise. */
 				if (in0.s.codec_ctx) {
+					flush_output = S_STALLED != state;
 					state = S_RUNNING;
 				} else {
 					xassert(!pthread_mutex_unlock(&file_lock));
@@ -3302,8 +3303,6 @@ source_worker(void *arg)
 
 				seek_buffer(INT64_MIN);
 				atomic_store_lax(&seek_pts, seek_file_pts);
-
-				flush_output = 0; /* TODO: Eh... seek by user =>flush or automatic =>no flush? */
 			}
 			xassert(!pthread_mutex_unlock(&file_lock));
 		}
