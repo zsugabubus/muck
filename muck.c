@@ -3136,23 +3136,21 @@ notify_progress(void)
 }
 
 static void
-do_wakeup(int *which0, int *which1)
+do_wakeup(int *cond)
 {
 	xassert(!pthread_mutex_lock(&buffer_lock));
-	*which0 = 1;
-	if (which1)
-		*which1 = 1;
+	*cond = 1;
 	xassert(!pthread_cond_broadcast(&buffer_wakeup));
 	xassert(!pthread_mutex_unlock(&buffer_lock));
 }
 
 static void
-wait_wakeup(int *which)
+wait_wakeup(int *cond)
 {
 	xassert(!pthread_mutex_lock(&buffer_lock));
-	while (!*which)
+	while (!*cond)
 		xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
-	*which = 0;
+	*cond = 0;
 	xassert(!pthread_mutex_unlock(&buffer_lock));
 }
 
@@ -3188,7 +3186,7 @@ seek_player(int64_t ts, int whence)
 		ts = duration;
 
 	atomic_store_lax(&seek_pts, ts);
-	do_wakeup(&wakeup_source, NULL);
+	do_wakeup(&wakeup_source);
 }
 
 static int
@@ -3440,7 +3438,7 @@ source_worker(void *arg)
 				atomic_fetch_add_explicit(&buffer_tail, 1, memory_order_release);
 			if (unlikely(was_empty)) {
 			wakeup_sink:
-				do_wakeup(&wakeup_sink, NULL);
+				do_wakeup(&wakeup_sink);
 			}
 
 			notify_progress();
@@ -3517,7 +3515,7 @@ sink_worker(void *arg)
 		assert(0 <= rem_bytes);
 		if (rem_bytes <= atomic_load_lax(&buffer_low)) {
 			atomic_store_lax(&buffer_low, INT64_MIN);
-			do_wakeup(&wakeup_source, NULL);
+			do_wakeup(&wakeup_source);
 		}
 
 		int graph_changed = 0;
@@ -3628,7 +3626,8 @@ bye(void)
 #if CONFIG_VALGRIND
 	if (threads_inited) {
 		atomic_store_lax(&terminate, 1);
-		do_wakeup(&wakeup_source, &wakeup_sink);
+		do_wakeup(&wakeup_source);
+		do_wakeup(&wakeup_sink);
 
 		xassert(!pthread_join(source_thread, NULL));
 
@@ -3663,7 +3662,7 @@ play_file(File *f, int64_t pts)
 	/* Mutex will acquire. */
 	atomic_store_lax(&seek_file_pts, pts);
 	atomic_store_lax(&seek_file0, f);
-	do_wakeup(&wakeup_source, NULL);
+	do_wakeup(&wakeup_source);
 }
 
 static FILE *
@@ -3834,8 +3833,10 @@ static void
 pause_player(int pause)
 {
 	atomic_store_lax(&paused, pause);
-	if (!pause)
-		do_wakeup(&wakeup_source, &wakeup_sink);
+	if (!pause) {
+		do_wakeup(&wakeup_source);
+		do_wakeup(&wakeup_sink);
+	}
 	notify_event(EVENT_STATE_CHANGED);
 }
 
@@ -3968,7 +3969,7 @@ do_key(int c)
 
 	case 'M': /* Metadata. */
 		atomic_store_lax(&dump_in0, 1);
-		do_wakeup(&wakeup_source, NULL);
+		do_wakeup(&wakeup_source);
 		break;
 
 	case CONTROL('I'):
