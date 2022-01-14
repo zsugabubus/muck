@@ -487,7 +487,7 @@ static void
 notify_event(enum Event event)
 {
 	if (!atomic_fetch_or_lax(&pending_events, event))
-		pthread_kill(main_thread, SIGRTMIN);
+		xassert(!pthread_kill(main_thread, SIGRTMIN));
 }
 
 static char const *
@@ -3288,8 +3288,7 @@ source_worker(void *arg)
 				open_input(&in0);
 				update_cover(&in0);
 				update_input_info();
-				if (atomic_load_lax(&focused))
-					notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
+				notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 
 				/* Otherwise would be noise. */
 				if (in0.s.codec_ctx) {
@@ -4683,7 +4682,9 @@ handle_signotify(int sig)
 		live = old_live;
 	}
 
-	if ((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events) {
+	if (((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events) &&
+	    atomic_load_lax(&focused))
+	{
 		if (EVENT_FILE_CHANGED & got_events)
 			draw_files();
 
