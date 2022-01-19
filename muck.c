@@ -84,6 +84,7 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 #define atomic_fetch_add_lax(...) atomic_fetch_add_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_or_lax(...) atomic_fetch_or_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_sub_lax(...) atomic_fetch_sub_explicit(__VA_ARGS__, memory_order_relaxed)
+#define atomic_fetch_xor_lax(...) atomic_fetch_xor_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_load_lax(...) atomic_load_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_store_lax(...) atomic_store_explicit(__VA_ARGS__, memory_order_relaxed)
 
@@ -464,6 +465,7 @@ static int64_t cur_number[2];
 static int sel_y, sel_x;
 static int scroll_x;
 static int widen;
+static atomic_uchar show_stream;
 
 static FILE *tty;
 static atomic_uchar ALIGNED_ATOMIC focused = 1;
@@ -1880,7 +1882,7 @@ print_stream(char **pbuf, int *pn, Stream const *s, int output)
 				s->audio->duration,
 				s->audio->time_base.num,
 				s->audio->time_base.den);
-		sbprintf(pbuf, pn, ", %3"PRId64":%02hu",
+		sbprintf(pbuf, pn, ", %"PRId64":%02hu",
 				duration / 60,
 				(unsigned char)(duration % 60));
 	}
@@ -2018,6 +2020,9 @@ update_output_info(void)
 	int n = sizeof sink_info.buf[0];
 	print_stream(&buf, &n, &out, 1);
 	birdlock_wr_release(&sink_info.lock);
+
+	if (atomic_load_lax(&show_stream))
+		notify_event(EVENT_STATE_CHANGED);
 }
 
 static int
@@ -3234,6 +3239,9 @@ update_input_info(void)
 			sbprintf(&buf, &n, "; cover_front(none)");
 	}
 	birdlock_wr_release(&source_info.lock);
+
+	if (atomic_load_lax(&show_stream))
+		notify_event(EVENT_STATE_CHANGED);
 }
 
 static void do_key(int c);
@@ -3970,7 +3978,7 @@ do_key(int c)
 		break;
 
 	case 'v':
-		if (atomic_fetch_xor_explicit(&live, 1, memory_order_relaxed))
+		if (atomic_fetch_xor_lax(&live, 1))
 			atomic_store_lax(&sel, atomic_load_lax(&in0.pf.f));
 		/* Keep values on entering visual mode. */
 		cur_filter[0] = cur_filter[1];
@@ -4183,6 +4191,11 @@ do_key(int c)
 	case 'w':
 		widen ^= 1;
 		notify_event(EVENT_FILE_CHANGED);
+		break;
+
+	case 'O':
+		atomic_fetch_xor_lax(&show_stream, 1);
+		notify_event(EVENT_STATE_CHANGED);
 		break;
 
 	case '?':
@@ -4567,11 +4580,6 @@ draw_files(void)
 		clrtoeol();
 	}
 
-#if 0
-	fprintf(tty, "%s -> %s"LF,
-			source_info.buf[birdlock_rd_acquire(&source_info.lock)],
-			sink_info.buf[birdlock_rd_acquire(&sink_info.lock)]);
-#endif
 	update_title(playing);
 }
 
@@ -4607,15 +4615,22 @@ draw_progress(void)
 			"%3"PRId64":%02u"
 			" / "
 			"%3"PRId64":%02u"
-			" (%3u%%)"
-			" [Track: %u/%u]"
-			" [Vol: %3d%%]",
+			" (%3u%%)",
 			clock / 60, (unsigned)(clock % 60),
 			duration / 60, (unsigned)(duration % 60),
-			duration ? (unsigned)(clock * 100 / duration) : 0,
-			atomic_load_lax(&cur_track) + 1,
-			atomic_load_lax(&in0.nb_audios),
-			atomic_load_lax(&volume));
+			duration ? (unsigned)(clock * 100 / duration) : 0);
+
+	if (1 < atomic_load_lax(&in0.nb_audios))
+		printw(" [Track: %u/%u]",
+				atomic_load_lax(&cur_track) + 1,
+				atomic_load_lax(&in0.nb_audios));
+
+	printw(" [Vol: %3d%%]", atomic_load_lax(&volume));
+
+	if (show_stream)
+		printw(" [%s -> %s]",
+				source_info.buf[birdlock_rd_acquire(&source_info.lock)],
+				sink_info.buf[birdlock_rd_acquire(&sink_info.lock)]);
 
 	addstr(" [");
 	int x = getcurx(stdscr);
