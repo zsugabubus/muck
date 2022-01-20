@@ -3894,22 +3894,17 @@ cat_history_file(char const *name, FILE *stream)
 static void
 print_syntax_help(File const *cur, FILE *stream)
 {
-	fputs(
-"# SYNTAX\n"
-"# ======\n"
-"#\n"
-"# KEY := {\n", stream);
+	fputs("# Keys:\n", stream);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
 		char mbuf[FILE_METADATA_BUFSZ];
 		char const *value = cur ? get_metadata(cur, i, mbuf) : NULL;
-		fprintf(stream, "#  %c%c=%-*s%s\n",
+		fprintf(stream, "# %c%c=%-*s%s\n",
 				METADATA_IN_URL & (UINT64_C(1) << i) ? '+' : ' ',
 				METADATA_LETTERS[i],
 				value && *value ? (int)sizeof METADATA_NAMES[i] : 0,
 				METADATA_NAMES[i],
 				value ? value : "");
 	}
-	fputs("# }\n", stream);
 }
 
 static void
