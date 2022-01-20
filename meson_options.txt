@@ -1,0 +1,1 @@
+option('unicode', type: 'feature', description: 'compare Unicode')

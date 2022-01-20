@@ -4,14 +4,28 @@
 #include <stdatomic.h>
 #include <emmintrin.h>
 
-#define BIRDLOCK_INITIALIZER { 0, 0 }
+#define BIRDLOCK_INITIALIZER { 0 }
 
 /**
  * SPMC binary read-write lock.
  */
 typedef struct {
-	unsigned char _Atomic rd, new_rd;
+	unsigned char _Atomic state; /* {rd slot} * 2 + {new data slot} */
 } BirdLock;
+
+/**
+ * @return 1 if new data is available, 0 otherwise
+ */
+static inline unsigned char
+birdlock_rd_test(BirdLock *lock)
+{
+	/* rn    n
+	 * 00 -> 0
+	 * 01 -> 1
+	 * 10 -> 1
+	 * 11 -> 0 */
+	return !((atomic_load_explicit(&lock->state, memory_order_relaxed) - 1) & 2);
+}
 
 /**
  * @return 0 or 1, index of readable object
@@ -19,11 +33,14 @@ typedef struct {
 static inline unsigned char
 birdlock_rd_acquire(BirdLock *lock)
 {
-	/* atomic_compare_exchange_strong_explicit(&new_rd, &rd, 2, memory_order_relaxed, memory_order_acquire); */
-
-	for (unsigned char v; lock->rd != (v = atomic_load_explicit(&lock->new_rd, memory_order_acquire));)
-		atomic_store_explicit(&lock->rd, v, memory_order_relaxed);
-	return lock->rd;
+	/* rn -> nn
+	 * 00 -> 00 (-> 00)
+	 * 01 -> 11 (-> 11)
+	 * 10 -> 00 (-> 00)
+	 * 11 -> 11 (-> 11) */
+	unsigned char state = atomic_load_explicit(&lock->state, memory_order_acquire);
+	atomic_store_explicit(&lock->state, -(state & 1), memory_order_relaxed);
+	return state & 1;
 }
 
 /**
@@ -32,20 +49,23 @@ birdlock_rd_acquire(BirdLock *lock)
 static inline unsigned char
 birdlock_wr_acquire(BirdLock *lock)
 {
-	for (unsigned char v; lock->new_rd != (v = atomic_load_explicit(&lock->rd, memory_order_relaxed));) {
-		atomic_store_explicit(&lock->new_rd, v, memory_order_relaxed);
-		_mm_pause(); /* Give a little more chance for readers. */
-	}
-	return !lock->new_rd;
+	return !birdlock_rd_acquire(lock);
 }
 
 /**
- * Finish writing.
+ * Commit write.
  */
 static inline void
 birdlock_wr_release(BirdLock const *lock)
 {
-	atomic_store_explicit(&lock->new_rd, !lock->new_rd, memory_order_release);
+	/* rn    rn
+	 * 00 -> 01
+	 * 10 -> (unreachable)
+	 * 01 -> (unreachable)
+	 * 11 -> 10 */
+	atomic_store_explicit(&lock->state,
+			atomic_load_explicit(&lock->state, memory_order_relaxed) ^ 1,
+			memory_order_release);
 }
 
-#endif /* BIRDLOCK_H */
+#endif

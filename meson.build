@@ -53,6 +53,7 @@ ffmpeg_dep = declare_dependency(
 )
 
 config = configuration_data()
+
 foreach fn: ['pthread_setname_np']
 	config.set10('HAVE_' + fn.to_upper(), cc.has_function(
 		fn,
@@ -60,16 +61,23 @@ foreach fn: ['pthread_setname_np']
 		dependencies: [dependency('threads')]
 	))
 endforeach
+
 foreach fn: ['__builtin_expect']
 	config.set10('HAVE_' + fn.to_upper(), cc.has_function(fn))
 endforeach
+
 foreach fn: ['strchrnul']
 	config.set10('HAVE_' + fn.to_upper(), cc.has_function(
 		fn,
 		prefix: '#define _GNU_SOURCE\n#include <string.h>',
 	))
 endforeach
+
 config.set10('CONFIG_VALGRIND', get_option('buildtype').contains('debug'))
+
+icu_dep = dependency('icu-i18n', required: get_option('unicode'))
+config.set10('WITH_ICU', icu_dep.found())
+
 configure_file(output: 'config.h', configuration: config)
 
 cover = custom_target(
@@ -83,6 +91,7 @@ executable('muck',
 	'muck.c', 'rnd.c', cover,
 	dependencies: [
 		ffmpeg_dep,
+		icu_dep,
 	],
 	install: true,
 )

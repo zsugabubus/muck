@@ -221,12 +221,18 @@ Switch audio track. When multiple tracks are available it is show in the status
 line.
 .
 .TP
-.BR O
+.BR i
 Toggle show stream information.
 .
 .TP
-.BR / ,\  =
-Search.
+.BR /
+Search. See section `SEARCH' for
+detailed description.
+.
+.TP
+.BR o ,\  =
+Set sort expression. See section `SORT' for
+detailed description.
 .
 .TP
 .B |
@@ -297,6 +303,9 @@ Go to bottom.
 Same as in live mode.
 .
 .SH SEARCH
+A temporary file is opened and shown for edit to the user. All lines but the
+first one is ignored.
+.P
 .I FIRST-LINE
 :=
 .I EXPR
@@ -473,6 +482,40 @@ v~'(b|a)'@Correct.
 (v'mix\\)')@Matches version containing "mix)".
 .TE
 .
+.SH SORT
+Similar to `SEARCH'.
+.P
+.I FIRST-LINE
+:=
+.I EXPR
+.br
+.I EXPR
+:= [
+.I KEY
+[ "=" ] [ "-" ] ]...
+.
+.P
+"=" performs a numeric sort on key. If no numbers are found, it falls back to
+string comparsion.
+.IP
+.TS
+tab(@)[];
+lb l.
+t=i=@Sort by track number THEN by index. "track-A" and "track-B" will be in correct order, though they do not contain any number.
+ad=n=ti=@Sort by artists THEN by disc/track number THEN by title THEN by index (just to be stable sort).
+.TE
+.
+.P
+"-" sorts key in the reverse direction.
+.IP
+.TS
+tab(@)[];
+lb l.
+m-@Latest added tracks.
+y-@Latest tracks.
+l-@Longest tracks first.
+.TE
+.
 .SH ENVIRONMENT
 .TP
 .B EDITOR
@@ -527,7 +570,7 @@ to hardware. When run in an XTerm-compatible terminal emulator screen is not
 updated when unfocused.
 .IP
 .EX
-muck -f alsa -o hw -a anull -e Os
+muck -f alsa -o hw -a anull -e is
 .EE
 .
 .P
@@ -535,7 +578,7 @@ Using together with
 .BR alsaequal .
 .IP
 .EX
-muck -f alsa -c pcm_f32le -a anull -e Os
+muck -f alsa -c pcm_f32le -a anull -e is
 .EE
 .
 .SH "SEE ALSO"
