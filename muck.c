@@ -311,11 +311,12 @@ struct Expr {
 };
 
 typedef struct {
+	char const *src;
 	char const *ptr;
-	char error_buf[256];
-	char const *error_msg;
 	File *cur;
 	pcre2_match_data *match_data;
+	char const *error_msg;
+	char error_buf[256];
 } ExprParserContext;
 
 typedef struct {
@@ -3140,39 +3141,32 @@ sort_files(void)
 }
 
 static void
-search_files(char const *s)
+search_files(ExprParserContext *parser, char const *s)
 {
-	ExprParserContext parser = { 0 };
 	Expr *query = NULL;
 
-	parser.cur = get_playing();
+	parser->error_msg = NULL;
+	parser->cur = get_playing();
+	parser->ptr = parser->src = s;
 
-	parser.match_data = pcre2_match_data_create(0, NULL);
-	if (!parser.match_data)
-		goto out;
-
-	parser.ptr = s;
-
-	query = expr_parse(&parser);
-	if (parser.error_msg) {
-		endwin();
-		/* TODO: Reopen visual search. */
-		fprintf(tty, "<string>:%zu: error: %s\n",
-				(size_t)(parser.ptr - s),
-				parser.error_msg);
-		fprintf(tty, "...%s\n", parser.ptr);
-		getchar();
-		refresh();
+	parser->match_data = pcre2_match_data_create(0, NULL);
+	if (!parser->match_data) {
+	fail_enomem:
+		parser->error_msg = strerror(ENOMEM);
 		goto out;
 	}
 
+	query = expr_parse(parser);
+	if (parser->error_msg)
+		goto out;
+
 	if (!expr_depends_key(query, MX_playlist)) {
-		parser.ptr = "p~^[^-]";
+		parser->src = parser->ptr = "p~^[^-]";
 
 		Expr *expr = expr_new(T_AND);
 		if (!expr)
-			goto out;
-		if (!(expr->bi.rhs = expr_parse(&parser))) {
+			goto fail_enomem;
+		if (!(expr->bi.rhs = expr_parse(parser))) {
 			expr_free(expr);
 			goto out;
 		}
@@ -3196,9 +3190,10 @@ search_files(char const *s)
 	sort_pending[0] = 1;
 	sort_pending[1] = 1;
 
-out:
-	pcre2_match_data_free(parser.match_data);
+	notify_event(EVENT_FILE_CHANGED);
 
+out:
+	pcre2_match_data_free(parser->match_data);
 	expr_free(query);
 }
 
@@ -3910,10 +3905,20 @@ print_syntax_help(File const *cur, FILE *stream)
 static void
 open_visual_search(void)
 {
+	ExprParserContext parser = { 0 };
+
+reopen:
 	char tmpname[PATH_MAX];
 	FILE *stream = open_tmpfile(tmpname);
 	if (!stream)
 		return;
+
+	if (parser.error_msg)
+		fprintf(stream, "%*s<ERROR>%s\n"
+				"# Error: %s\n\n",
+				(int)(parser.ptr - parser.src), parser.src,
+				parser.ptr,
+				parser.error_msg);
 
 	int any = 0;
 	for (size_t i = 0; i < FF_ARRAY_ELEMS(search_history) && search_history[i]; ++i)
@@ -3972,8 +3977,9 @@ open_visual_search(void)
 	else
 		free(line);
 
-	search_files(search_history[0]);
-	notify_event(EVENT_FILE_CHANGED);
+	search_files(&parser, search_history[0]);
+	if (parser.error_msg)
+		goto reopen;
 }
 
 static void
@@ -5150,8 +5156,14 @@ main(int argc, char **argv)
 		}
 	}
 
-	if (search_history[0])
-		search_files(search_history[0]);
+	if (search_history[0]) {
+		ExprParserContext parser;
+		search_files(&parser, search_history[0]);
+		if (parser.error_msg) {
+			print_error("Failed to parse search query");
+			exit(EXIT_FAILURE);
+		}
+	}
 
 	if (!startup_cmd)
 		startup_cmd = "s";
