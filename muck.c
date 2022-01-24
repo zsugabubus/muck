@@ -220,6 +220,10 @@ static uint64_t const METADATA_IN_URL =
 
 _Static_assert(MX_NB <= 64);
 
+enum {
+	FILE_METADATA_BUFSZ = 20,
+};
+
 enum FilterIndex {
 	FILTER_ALL,
 	FILTER_FILES,
@@ -330,11 +334,6 @@ typedef struct {
 } MatchFileContext;
 
 typedef struct {
-	MatchFileContext ctx;
-	pcre2_match_data *match_data;
-} MatchFileWorkerContext;
-
-typedef struct {
 	AVFormatContext *format_ctx;
 	AVCodecContext *codec_ctx;
 	AVStream *audio;
@@ -351,6 +350,7 @@ typedef struct {
 	int dirfd;
 	char *url;
 	enum FileType type;
+	unsigned track;
 	int whence;
 	int64_t ts;
 } SeekEvent;
@@ -386,8 +386,8 @@ typedef struct {
 typedef struct {
 	Stream s;
 	AVStream *cover_front;
-	int fd; /**< -1 for F_URL. */
-	unsigned nb_audios;
+	int fd;
+	unsigned ntracks;
 	File *f; /* File source of events. */
 
 	/* All other file references must be treated opaque. Only this single
@@ -401,24 +401,30 @@ typedef struct {
 	BirdLock metadata_lock;
 } Input;
 
-typedef struct FileTask FileTask;
+enum Event {
+	EVENT_FILE_CHANGED = 1 << 0,
+	EVENT_STATE_CHANGED = 1 << 1,
+	EVENT_METADATA_CHANGED = 1 << 2,
+	EVENT_EOF_REACHED = 1 << 3,
+};
 
+typedef struct Task Task;
 typedef struct {
-	FileTask *task;
+	Task *task;
 	int32_t cur;
-	size_t count;
+	int32_t end;
 	pthread_t thread;
 	void const *arg;
-} FileTaskWorker;
+} TaskWorker;
 
-struct FileTask {
+struct Task {
 	pthread_mutex_t mutex;
 	int32_t cur;
 	int32_t remaining;
 	int32_t batch_size;
 	uint8_t nworkers;
-	int (*routine)(FileTaskWorker *, void const *);
-	FileTaskWorker workers[64];
+	int (*routine)(TaskWorker *, void const *);
+	TaskWorker workers[64];
 };
 
 static pthread_t main_thread;
@@ -435,7 +441,6 @@ static char const *ofilename = NULL;
 
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
-static unsigned _Atomic cur_track;
 static atomic_uchar ALIGNED_ATOMIC dump_in0;
 
 static struct {
@@ -499,6 +504,7 @@ static uint8_t cur_filter[2] = {
 	FILTER_FILES,
 	FILTER_FILES,
 };
+static Expr *filter_exprs[8];
 
 static char *search_history[10];
 
@@ -525,20 +531,19 @@ static char number_cmd[2];
 static int32_t cur_number[2];
 static int widen;
 static atomic_uchar show_stream;
+static unsigned cur_track;
 static char seek_cmd = 'n';
 static RndState rnd;
+
+static char info_msg[2][128];
+static uint8_t info_rd;
+static BirdLock info_msg_lock;
 
 static char config_home[PATH_MAX];
 static char cover_path[PATH_MAX];
 
 static pcre2_code *re_ucase;
-
-enum Event {
-	EVENT_FILE_CHANGED = 1 << 0,
-	EVENT_STATE_CHANGED = 1 << 1,
-	EVENT_METADATA_CHANGED = 1 << 2,
-	EVENT_EOF_REACHED = 1 << 3,
-};
+static pcre2_match_data *re_match_data;
 
 static atomic_uchar ALIGNED_ATOMIC pending_events;
 
@@ -565,10 +570,6 @@ print_error(char const *msg, ...)
 	va_end(ap);
 }
 
-static char info_msg[2][128];
-static uint8_t info_rd;
-static BirdLock info_msg_lock;
-
 static void
 notify_msg(char const *format, ...)
 {
@@ -593,9 +594,16 @@ notify_strerror(char const *msg)
 }
 
 static void
-print_strerror_oom(void)
+notify_strerror_oom(void)
 {
 	notify_strerror("Cannot allocate memory");
+}
+
+static void
+notify_oom(void)
+{
+	errno = ENOMEM;
+	notify_strerror_oom();
 }
 
 static void
@@ -709,7 +717,7 @@ ensure_size1(void *pp, int32_t nmemb, int32_t size)
 	if (!((nmemb + 1) & nmemb)) {
 		void *p = realloc(*(void **)pp, ((nmemb + 1) * 2 - 1) * size);
 		if (!p) {
-			print_strerror_oom();
+			notify_strerror_oom();
 			return -ENOMEM;
 		}
 		*(void **)pp = p;
@@ -727,7 +735,7 @@ append_file(Playlist *parent, enum FileType type, size_t url_size)
 	File *f = malloc(sizeof *f);
 	char *url = malloc(url_size);
 	if (!f || !url) {
-		print_strerror_oom();
+		notify_strerror_oom();
 		free(f);
 		free(url);
 		return NULL;
@@ -776,7 +784,7 @@ append_playlist(File const *f, char const *name)
 	Playlist *playlist = malloc(sizeof *playlist);
 	char *s = strdup(name);
 	if (!playlist || !s) {
-		print_strerror_oom();
+		notify_strerror_oom();
 		free(playlist);
 		free(s);
 		return NULL;
@@ -1046,7 +1054,7 @@ out:
 }
 
 static void
-read_playlist_directory(Playlist *playlist, int fd)
+read_playlist_dir(Playlist *playlist, int fd)
 {
 	playlist->dirfd = fd;
 	playlist->dirname = strdup(playlist->f->url);
@@ -1140,7 +1148,7 @@ read_playlist(Playlist *playlist, int fd)
 		break;
 
 	case F_PLAYLIST_DIRECTORY:
-		read_playlist_directory(playlist, fd);
+		read_playlist_dir(playlist, fd);
 		break;
 
 	default:
@@ -1553,7 +1561,7 @@ read_stream_metadata(MetadataEvent const *e)
 
 	void *p = malloc(fdata_size);
 	if (!p) {
-		print_strerror_oom();
+		notify_strerror_oom();
 		return -1;
 	}
 
@@ -1659,7 +1667,7 @@ read_metadata(MetadataEvent const *e)
 
 	void *p = malloc(fdata_size);
 	if (!p) {
-		print_strerror_oom();
+		notify_strerror_oom();
 		return -1;
 	}
 
@@ -1681,7 +1689,7 @@ fail_too_long:
 }
 
 static void
-update_cover(Input const *in)
+write_cover(Input const *in)
 {
 	char tmp[PATH_MAX];
 	if (ssprintf(tmp, "%s~", cover_path) < 0)
@@ -1802,8 +1810,7 @@ open_input(Input *in, SeekEvent *e)
 	in->cover_front = NULL;
 	in->s.audio = NULL;
 
-	unsigned nb_audios = 0;
-	unsigned track = atomic_load_lax(&cur_track);
+	unsigned ntracks = 0;
 
 	for (unsigned i = 0; i < in->s.format_ctx->nb_streams; ++i) {
 		AVStream *stream = in->s.format_ctx->streams[i];
@@ -1811,9 +1818,9 @@ open_input(Input *in, SeekEvent *e)
 		stream->discard = AVDISCARD_ALL;
 
 		if (AVMEDIA_TYPE_AUDIO == stream->codecpar->codec_type) {
-			if (!track || track == nb_audios)
+			if (e->track == ntracks)
 				in->s.audio = stream;
-			++nb_audios;
+			++ntracks;
 			continue;
 		}
 
@@ -1830,15 +1837,13 @@ open_input(Input *in, SeekEvent *e)
 		}
 	}
 
-	atomic_store_lax(&in->nb_audios, nb_audios);
+	atomic_store_lax(&in->ntracks, ntracks);
 
 	if (!in->s.audio) {
 		notify_msg("No audio streams found");
 		return;
 	}
 
-	if (track < nb_audios)
-		atomic_store_lax(&cur_track, 0);
 #if 0
 	AVStream *default_stream = in->s.format_ctx->streams[av_find_default_stream_index(in->s.format_ctx)];
 	if (default_stream->opaque)
@@ -2153,8 +2158,6 @@ fail:
 	close_output();
 	return -1;
 }
-
-enum { FILE_METADATA_BUFSZ = 20, };
 
 static char const *
 get_metadata(File const *f, enum MetadataX m, char buf[FILE_METADATA_BUFSZ])
@@ -2735,31 +2738,10 @@ fail:
 	return NULL;
 }
 
-static void
-match_file(File *f, MatchFileWorkerContext const *worker_ctx)
-{
-	/* Hide playlists. */
-	if (F_FILE < f->type)
-		return;
-	assert(worker_ctx->ctx.filter_index);
-
-	uint8_t filter_mask = UINT8_C(1) << worker_ctx->ctx.filter_index;
-	if (expr_eval(worker_ctx->ctx.query, &(ExprEvalContext const){
-		.f = f,
-		.match_data = worker_ctx->match_data,
-	})) {
-		f->filter_mask |= filter_mask;
-		atomic_fetch_add_lax(&nfiles[worker_ctx->ctx.filter_index], 1);
-	} else {
-		f->filter_mask &= ~filter_mask;
-	}
-	assert(f->filter_mask);
-}
-
 static void *
 task_worker(void *arg)
 {
-	FileTaskWorker *worker = arg;
+	TaskWorker *worker = arg;
 
 #if HAVE_PTHREAD_SETNAME_NP
 	char name[16];
@@ -2772,7 +2754,7 @@ task_worker(void *arg)
 }
 
 static int
-for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *arg)
+for_each_file_par(int (*routine)(TaskWorker *, void const *), void const *arg)
 {
 	static int32_t const BATCH_SIZE_MIN = 16;
 	static int32_t const BATCH_SIZE_MAX = 256;
@@ -2780,11 +2762,10 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 	static long ncpus;
 	if (!ncpus) {
 		ncpus = sysconf(_SC_NPROCESSORS_ONLN);
-		ncpus = FFCLAMP(1, ncpus, FF_ARRAY_ELEMS(((FileTask *)0)->workers));
-		ncpus = 1;
+		ncpus = FFCLAMP(1, ncpus, FF_ARRAY_ELEMS(((Task *)0)->workers));
 	}
 
-	FileTask task;
+	Task task;
 
 	xassert(!pthread_mutex_init(&task.mutex, NULL));
 
@@ -2804,9 +2785,9 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 	int rc;
 
 	task.routine = routine;
-	FileTaskWorker *worker = task.workers;
+	TaskWorker *worker = task.workers;
 	for (;;) {
-		*worker = (FileTaskWorker){
+		*worker = (TaskWorker){
 			.task = &task,
 			.arg = arg,
 		};
@@ -2822,7 +2803,7 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 	}
 
 	while (task.workers <= --worker)
-		pthread_join(worker->thread, NULL);
+		xassert(!pthread_join(worker->thread, NULL));
 
 	xassert(!pthread_mutex_destroy(&task.mutex));
 
@@ -2830,30 +2811,27 @@ for_each_file_par(int (*routine)(FileTaskWorker *, void const *), void const *ar
 }
 
 static File *
-worker_get(FileTaskWorker *worker)
+worker_get(TaskWorker *worker)
 {
-	if (!worker->count) {
-		FileTask *task = worker->task;
+	if (unlikely(worker->end <= worker->cur)) {
+		Task *task = worker->task;
+
+		if (unlikely(!task->remaining))
+			return 0;
+
 		xassert(!pthread_mutex_lock(&task->mutex));
 
 		int32_t n = FFMIN(task->batch_size, task->remaining);
 		worker->cur = task->cur;
-		worker->count = n;
+		worker->end = task->cur + n;
+
 		task->remaining -= n;
-		task->cur = worker->cur + n;
+		task->cur = worker->end;
 
 		xassert(!pthread_mutex_unlock(&task->mutex));
-
-		if (!worker->count)
-			return 0;
 	}
 
-	File *ret = files[worker->cur];
-
-	++worker->cur;
-	--worker->count;
-
-	return ret;
+	return files[worker->cur++];
 }
 
 static int
@@ -2894,28 +2872,42 @@ spawn(void)
 }
 
 static int
-match_file_worker(FileTaskWorker *worker, void const *arg)
+match_file_worker(TaskWorker *worker, void const *arg)
 {
 	pcre2_match_data *match_data = pcre2_match_data_create(0, NULL);
 	if (!match_data)
 		return -ENOMEM;
 
-	MatchFileWorkerContext worker_ctx = {
-		.ctx = *(MatchFileContext *)arg,
-		.match_data = match_data,
-	};
+	MatchFileContext const *ctx = arg;
+	uint8_t filter_mask = UINT8_C(1) << ctx->filter_index;
 
-	for (File *f; (f = worker_get(worker));)
-		match_file(f, &worker_ctx);
+	int32_t n = 0;
+	for (File *f; (f = worker_get(worker));) {
+		/* Hide playlists. */
+		if (F_FILE < f->type)
+			continue;
+
+		if (expr_eval(ctx->query, &(ExprEvalContext const){
+			.f = f,
+			.match_data = match_data,
+		})) {
+			f->filter_mask |= filter_mask;
+			++n;
+		} else {
+			f->filter_mask &= ~filter_mask;
+		}
+	}
 
 	pcre2_match_data_free(match_data);
+
+	atomic_fetch_add_lax(&nfiles[ctx->filter_index], n);
 	return 0;
 }
 
 static File *
 get_playing(void)
 {
-	return atomic_load_lax(&in0.seek_f);
+	return in0.seek_f;
 }
 
 static int32_t const POS_RND = INT32_MIN;
@@ -3140,35 +3132,31 @@ sort_files(void)
 	}
 }
 
-static void
-search_files(ExprParserContext *parser, char const *s)
+static Expr *
+parse_filter_spec(ExprParserContext *parser, char const *s)
 {
 	Expr *query = NULL;
 
 	parser->error_msg = NULL;
 	parser->cur = get_playing();
 	parser->ptr = parser->src = s;
-
-	parser->match_data = pcre2_match_data_create(0, NULL);
-	if (!parser->match_data) {
-	fail_enomem:
-		parser->error_msg = strerror(ENOMEM);
-		goto out;
-	}
+	parser->match_data = re_match_data;
 
 	query = expr_parse(parser);
 	if (parser->error_msg)
-		goto out;
+		goto fail;
 
 	if (!expr_depends_key(query, MX_playlist)) {
 		parser->src = parser->ptr = "p~^[^-]";
 
 		Expr *expr = expr_new(T_AND);
-		if (!expr)
-			goto fail_enomem;
+		if (!expr) {
+			parser->error_msg = strerror(ENOMEM);
+			goto fail;
+		}
 		if (!(expr->bi.rhs = expr_parse(parser))) {
 			expr_free(expr);
-			goto out;
+			goto fail;
 		}
 		expr->bi.lhs = query;
 		query = expr;
@@ -3176,11 +3164,41 @@ search_files(ExprParserContext *parser, char const *s)
 
 	expr_optimize(&query);
 
-	/* TODO: Cache filters. */
-	cur_filter[live] = FILTER_CUSTOM_0 + live;
+	return query;
 
+fail:
+	expr_free(query);
+	return NULL;
+}
+
+static void select_file(File *f);
+
+static void
+handle_filter_change(void)
+{
+	if (!live)
+		return;
+
+	File *f = seek_playlist(0, SEEK_CUR);
+	File *cur = get_playing();
+	if (f && cur && f != cur)
+		select_file(f);
+}
+
+static void
+filter_files(ExprParserContext *parser, char const *s)
+{
+	Expr *query = parse_filter_spec(parser, s);
+	if (!query)
+		return;
+
+	cur_filter[live] = FILTER_CUSTOM_0 + live;
 	uint8_t filter_index = cur_filter[live];
 
+	expr_free(filter_exprs[filter_index]);
+	filter_exprs[filter_index] = query;
+
+	/* TODO: Cache filters. */
 	nfiles[filter_index] = 0;
 	(void)for_each_file_par(match_file_worker, &(MatchFileContext const){
 		.query = query,
@@ -3192,9 +3210,7 @@ search_files(ExprParserContext *parser, char const *s)
 
 	notify_event(EVENT_FILE_CHANGED);
 
-out:
-	pcre2_match_data_free(parser->match_data);
-	expr_free(query);
+	handle_filter_change();
 }
 
 static void
@@ -3324,7 +3340,7 @@ source_worker(void *arg)
 
 	AVPacket *pkt = av_packet_alloc();
 	if (!pkt) {
-		print_error("Cannot allocate memory");
+		notify_oom();
 		goto terminate;
 	}
 
@@ -3356,7 +3372,7 @@ source_worker(void *arg)
 
 			in0.f = e->f;
 			open_input(&in0, e);
-			update_cover(&in0);
+			write_cover(&in0);
 			update_input_info();
 
 			/* Otherwise would be noise. */
@@ -3371,10 +3387,20 @@ source_worker(void *arg)
 		if (likely(in0.s.codec_ctx)) {
 			int64_t target_pts = e->ts;
 			switch (e->whence) {
-			case SEEK_SET: /* Noop. */ break;
-			case SEEK_CUR: target_pts += atomic_load_lax(&cur_pts); break;
-			case SEEK_END: target_pts += atomic_load_lax(&cur_duration); break;
-			default: abort();
+			case SEEK_SET:
+				/* Noop. */
+				break;
+
+			case SEEK_CUR:
+				target_pts += atomic_load_lax(&cur_pts);
+				break;
+
+			case SEEK_END:
+				target_pts += atomic_load_lax(&cur_duration);
+				break;
+
+			default:
+				abort();
 			}
 			target_pts = FFCLAMP(0, target_pts, cur_duration);
 
@@ -3453,7 +3479,7 @@ source_worker(void *arg)
 			if (unlikely(!frame) &&
 			    unlikely(!(frame = av_frame_alloc())))
 			{
-				print_error("Cannot allocate memory");
+				notify_oom();
 				state = S_STOPPED;
 				goto wait;
 			}
@@ -3548,7 +3574,7 @@ sink_worker(void *arg)
 	AVBufferSrcParameters *pars = av_buffersrc_parameters_alloc();
 
 	if (!pkt || !pars) {
-		print_error("Cannot allocate memory");
+		notify_oom();
 		goto terminate;
 	}
 
@@ -3753,6 +3779,8 @@ bye(void)
 	close_graph();
 
 	pcre2_code_free(re_ucase);
+	pcre2_match_data_free(re_match_data);
+
 #if WITH_ICU
 	if (sort_ucol)
 		ucol_close(sort_ucol);
@@ -3769,6 +3797,9 @@ bye(void)
 	for (int i = 0; i < 2; ++i)
 		if (DEFAULT_SORT_SPEC != sort_spec[i])
 			free(sort_spec[i]);
+
+	for (size_t i = 0; i < FF_ARRAY_ELEMS(filter_exprs); ++i)
+		expr_free(filter_exprs[i]);
 #endif
 }
 
@@ -3788,6 +3819,7 @@ play_file(File const *f, int64_t ts)
 	e->type = f->type;
 	free(e->url);
 	e->url = strdup(f->url);
+	e->track = cur_track;
 	xdup2(playlist->dirfd, &e->dirfd);
 	e->whence = SEEK_SET;
 	e->ts = ts;
@@ -3977,7 +4009,7 @@ reopen:
 	else
 		free(line);
 
-	search_files(&parser, search_history[0]);
+	filter_files(&parser, search_history[0]);
 	if (parser.error_msg)
 		goto reopen;
 }
@@ -4041,10 +4073,12 @@ select_file(File *f)
 	if (!f)
 		return;
 
-	if (live)
+	if (live) {
+		cur_track = 0;
 		play_file(f, AV_NOPTS_VALUE);
-	else
+	} else {
 		sel = f->index[live];
+	}
 	notify_event(EVENT_FILE_CHANGED);
 }
 
@@ -4194,9 +4228,10 @@ do_key(int c)
 
 	case 't': /* Tracks. */
 	{
-		unsigned n = atomic_load_lax(&in0.nb_audios);
+		unsigned n = atomic_load_lax(&in0.ntracks);
 		if (n) {
-			atomic_store_lax(&cur_track, (cur_track + 1) % n);
+			cur_track += 1;
+			cur_track %= n;
 			File *cur = get_playing();
 			if (cur)
 				play_file(cur, atomic_load_lax(&cur_pts));
@@ -4206,12 +4241,6 @@ do_key(int c)
 
 	case '/': /* Search. */
 		open_visual_search();
-		if (live) {
-			File const *f = seek_playlist(0, SEEK_CUR);
-			File *cur = get_playing();
-			if (f && f != cur)
-				play_file(f, AV_NOPTS_VALUE);
-		}
 		break;
 
 	case '|':
@@ -4413,8 +4442,12 @@ do_key(int c)
 		break;
 
 	case CONTROL('M'):
-		if (0 <= sel)
-			play_file(files[sel], AV_NOPTS_VALUE);
+		if (0 <= sel) {
+			int old_live = live;
+			live = 1;
+			select_file(files[sel]);
+			live = old_live;
+		}
 		pause_player(0);
 		break;
 
@@ -4802,10 +4835,11 @@ draw_status_line(void)
 			duration / 60, (unsigned)(duration % 60),
 			duration ? (unsigned)(clock * 100 / duration) : 0);
 
-	if (1 < atomic_load_lax(&in0.nb_audios))
-		printw(" [Track: %u/%u]",
-				atomic_load_lax(&cur_track) + 1,
-				atomic_load_lax(&in0.nb_audios));
+	{
+		unsigned n = atomic_load_lax(&in0.ntracks);
+		if (1 < n)
+			printw(" [Track: %u/%u]", cur_track + 1, n);
+	}
 
 	printw(" [Vol: %3d%%]", atomic_load_lax(&volume));
 
@@ -4867,6 +4901,37 @@ handle_sigexit(int sig)
 }
 
 static void
+handle_metadata_change(File *f)
+{
+	uint8_t filter_index = cur_filter[live];
+	if (FILTER_CUSTOM_0 <= filter_index) {
+		Expr *query = filter_exprs[filter_index];
+		uint8_t filter_mask = UINT8_C(1) << filter_index;
+		int match = expr_eval(query, &(ExprEvalContext const){
+			.f = f,
+			.match_data = re_match_data,
+		});
+		if (match != !!(filter_mask & f->filter_mask)) {
+			f->filter_mask ^= filter_mask;
+			nfiles[filter_index] += match ? 1 : -1;
+
+			sort_pending[0] = 1;
+			sort_pending[1] = 1;
+
+			handle_filter_change();
+		}
+	}
+
+	int old_live = live;
+	for (live = 0; live < 2; ++live)
+		if (!file_ordered(f)) {
+			sort_has_order[live] = 0;
+			sort_pending[live] = 1;
+		}
+	live = old_live;
+}
+
+static void
 handle_signotify(int sig)
 {
 	(void)sig;
@@ -4886,13 +4951,7 @@ handle_signotify(int sig)
 
 			if (0 < rc) {
 				got_events |= EVENT_FILE_CHANGED;
-				int changed = !file_ordered(e->f);
-				if (changed) {
-					sort_has_order[0] = 0;
-					sort_has_order[1] = 0;
-					sort_pending[0] = 1;
-					sort_pending[1] = 1;
-				}
+				handle_metadata_change(e->f);
 			}
 		}
 	}
@@ -4941,7 +5000,13 @@ main(int argc, char **argv)
 			PCRE2_UTF | PCRE2_NO_UTF_CHECK,
 			&error_code, &error_offset,
 			NULL);
-		xassert(re_ucase);
+
+		re_match_data = pcre2_match_data_create(0, NULL);
+
+		if (!re_ucase || !re_match_data) {
+			print_error("Failed to allocate PCRE2 structures");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 #if WITH_ICU
@@ -5158,7 +5223,7 @@ main(int argc, char **argv)
 
 	if (search_history[0]) {
 		ExprParserContext parser;
-		search_files(&parser, search_history[0]);
+		filter_files(&parser, search_history[0]);
 		if (parser.error_msg) {
 			print_error("Failed to parse search query");
 			exit(EXIT_FAILURE);
