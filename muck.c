@@ -4452,9 +4452,7 @@ do_key(int c)
 		break;
 
 	case 'Z': /* Zzz. */
-	case 'Q':
 	case 'q':
-	case KEY_F(10):
 		exit(EXIT_SUCCESS);
 
 	default:
