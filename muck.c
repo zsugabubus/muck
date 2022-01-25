@@ -3803,6 +3803,8 @@ bye(void)
 #endif
 }
 
+static void update_title(void);
+
 static void
 play_file(File const *f, int64_t ts)
 {
@@ -3826,6 +3828,8 @@ play_file(File const *f, int64_t ts)
 
 	birdlock_wr_release(&in0.seek_lock);
 	do_wakeup(&wakeup_source);
+
+	update_title();
 }
 
 static FILE *
@@ -4502,17 +4506,13 @@ log_cb(void *ctx, int level, char const *format, va_list ap)
 }
 
 static void
-draw_cursor(void)
+update_title(void)
 {
-	move(sel_y, sel_x);
-}
+	File const *f = get_playing();
 
-static void
-update_title(File const *f)
-{
+	/* Note that metadata is free from control characters. */
 	fputs("\033]0;", tty);
 	if (f && f->metadata[M_title]) {
-		/* Note that metadata is free from control characters. */
 		fputs(f->url + f->metadata[M_title], tty);
 		if (f->metadata[M_version])
 			fprintf(tty, " (%s)", f->url + f->metadata[M_version]);
@@ -4522,6 +4522,12 @@ update_title(File const *f)
 		fputs("muck", tty);
 	}
 	fputc('\a', tty);
+}
+
+static void
+draw_cursor(void)
+{
+	move(sel_y, sel_x);
 }
 
 static void
@@ -4792,8 +4798,6 @@ draw_files(void)
 		addch('~');
 		clrtoeol();
 	}
-
-	update_title(playing);
 }
 
 static void
@@ -4927,6 +4931,9 @@ handle_metadata_change(File *f)
 			sort_pending[live] = 1;
 		}
 	live = old_live;
+
+	if (f == in0.seek_f)
+		update_title();
 }
 
 static void
