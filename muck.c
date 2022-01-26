@@ -557,9 +557,6 @@ notify_event(enum Event event)
 static void
 print_error(char const *msg, ...)
 {
-	if (!stderr)
-		return;
-
 	va_list ap;
 	va_start(ap, msg);
 	flockfile(stderr);
@@ -805,9 +802,6 @@ append_playlist(File const *f, char const *name)
 static void
 print_playlist_error(Playlist const *playlist, int color, char const *msg, size_t lnum, size_t col)
 {
-	if (!stderr)
-		return;
-
 	flockfile(stderr);
 	fprintf(stderr, "\033[1;%dm", color);
 	fputs(playlist->name, stderr);
@@ -4493,9 +4487,6 @@ log_cb(void *ctx, int level, char const *format, va_list ap)
 	if (av_log_get_level() < level)
 		return;
 
-	if (!stderr)
-		return;
-
 	flockfile(stderr);
 	if (level <= AV_LOG_ERROR)
 		fputs("\033[1;31m", stderr);
@@ -5241,11 +5232,11 @@ main(int argc, char **argv)
 
 	/* Disconnect stderr unless redirected. */
 	{
-		struct stat st_stdout, st_stderr;
-		if (fstat(STDOUT_FILENO, &st_stdout) < 0 ||
+		struct stat st_stdin, st_stderr;
+		if (fstat(STDIN_FILENO, &st_stdin) < 0 ||
 		    fstat(STDERR_FILENO, &st_stderr) < 0 ||
-		    (st_stdout.st_dev == st_stderr.st_dev &&
-		     st_stdout.st_ino == st_stderr.st_ino))
+		    (st_stdin.st_dev == st_stderr.st_dev &&
+		     st_stdin.st_ino == st_stderr.st_ino))
 			freopen("/dev/null", "w+", stderr);
 	}
 
