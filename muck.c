@@ -266,51 +266,49 @@ struct Playlist {
 	int32_t nfiles;
 };
 
-enum ExprType {
-	T_NEG,
-	T_AND,
-	T_OR,
-	T_KV,
-};
-
-enum KeyOp {
-	OP_RE = 1 << 0,
-	OP_LT = 1 << 1,
-	OP_EQ = 1 << 2,
-	OP_GT = 1 << 3,
-	OP_ISSET = 1 << 4,
-};
-
 /* NOTE: ZARY (NULL) is a special 0-ary expression that always evalutes to
  * true. */
 
 typedef struct Expr Expr;
-struct Expr {
-	enum ExprType type;
+
+typedef struct {
+	Expr *expr;
+} UnaryExpr;
+
+typedef struct {
+	Expr *lhs;
+	Expr *rhs;
+} BinaryExpr;
+
+typedef struct {
+	uint64_t keys;
+	enum KeyOp {
+		OP_RE = 1 << 0,
+		OP_LT = 1 << 1,
+		OP_EQ = 1 << 2,
+		OP_GT = 1 << 3,
+		OP_ISSET = 1 << 4,
+	} op;
 	union {
-		/* Unary operator. */
+		pcre2_code *re;
 		struct {
-			Expr *expr;
-		} un;
+			uint8_t nnums;
+			int32_t nums[5];
+		};
+	};
+} KVExpr;
 
-		/* Binary operator. */
-		struct {
-			Expr *lhs;
-			Expr *rhs;
-		} bi;
-
-		/* Key-value expression. */
-		struct {
-			uint64_t keys;
-			enum KeyOp op;
-			union {
-				pcre2_code *re;
-				struct {
-					uint8_t nnums;
-					int32_t nums[5];
-				};
-			};
-		} kv;
+struct Expr {
+	enum ExprType {
+		T_NEG,
+		T_AND,
+		T_OR,
+		T_KV,
+	} type;
+	union {
+		UnaryExpr un;
+		BinaryExpr bi;
+		KVExpr kv;
 	};
 };
 
