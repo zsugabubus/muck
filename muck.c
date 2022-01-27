@@ -322,7 +322,7 @@ typedef struct {
 } ExprParserContext;
 
 typedef struct {
-	File *f;
+	File const *f;
 	pcre2_match_data *match_data;
 } ExprEvalContext;
 
