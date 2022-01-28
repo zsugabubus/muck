@@ -2915,7 +2915,7 @@ seek_playlist(int32_t pos, int whence)
 		return NULL;
 
 	if (POS_RND == pos)
-		pos = rndn(&rnd, n - (SEEK_CUR == whence));
+		pos = rnd_nextn(&rnd, n - (SEEK_CUR == whence));
 
 	if (SEEK_SET == whence) {
 		/* Noop. */

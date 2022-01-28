@@ -25,6 +25,6 @@ uint64_t rnd_next(RndState *state);
 /**
  * Generate a uniform random number in range [0..n).
  */
-uint64_t rndn(RndState *state, uint64_t n);
+uint64_t rnd_nextn(RndState *state, uint64_t n);
 
 #endif

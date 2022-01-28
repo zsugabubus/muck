@@ -49,7 +49,7 @@ rnd_next(RndState *state)
 }
 
 uint64_t
-rndn(RndState *state, uint64_t n)
+rnd_nextn(RndState *state, uint64_t n)
 {
 	uint64_t rem = UINT64_MAX % n;
 	uint64_t x;
