@@ -249,7 +249,6 @@ typedef struct {
 	int16_t playlist_index; /* Parent: playlists[playlist_index]. */
 	int32_t playlist_order; /* Order inside playlists. */
 	int32_t index[2]; /* files[x->index[live]] == x */
-	int32_t order[2]; /* Order without considering filters. */
 	uint16_t metadata[M_NB]; /* x => url + metadata[x]; 0 if key not present. */
 } File;
 
@@ -513,7 +512,6 @@ static char *sort_spec[2] = {
 	(char *)DEFAULT_SORT_SPEC,
 	(char *)DEFAULT_SORT_SPEC,
 };
-static int sort_has_order[2];
 static int sort_pending[2] = { 1, 1, };
 #if WITH_ICU
 static UCollator *sort_ucol;
@@ -750,8 +748,6 @@ append_file(Playlist *parent, enum FileType type, size_t url_size)
 		.index = { i, i, },
 	};
 
-	sort_has_order[0] = 0;
-	sort_has_order[1] = 0;
 	sort_pending[0] = 1;
 	sort_pending[1] = 1;
 
@@ -2944,15 +2940,6 @@ seek_playlist(int32_t pos, int whence)
 }
 
 static int
-file_order_cmp(void const *px, void const *py)
-{
-	File const *x = *(File **)px;
-	File const *y = *(File **)py;
-
-	return FFDIFFSIGN(x->order[live], y->order[live]);
-}
-
-static int
 file_cmp(void const *px, void const *py)
 {
 	File const *x = *(File **)px;
@@ -3106,7 +3093,7 @@ sort_files(void)
 
 	assert(n == k);
 
-	qsort(files, n, sizeof *files, sort_has_order[live] ? file_order_cmp : file_cmp);
+	qsort(files, n, sizeof *files, file_cmp);
 
 	for (int32_t i = 0; i < n; ++i)
 		files[i]->index[live] = i;
@@ -3115,13 +3102,6 @@ sort_files(void)
 		sel = cur->index[live];
 	else
 		sel = FFMIN(FFMAX(0, sel), n - 1);
-
-	if (!sort_has_order[live]) {
-		sort_has_order[live] = nfiles[FILTER_ALL] <= n;
-		if (sort_has_order[live])
-			for (int32_t i = 0; i < n; ++i)
-				files[i]->order[live] = i;
-	}
 }
 
 static Expr *
@@ -4037,7 +4017,6 @@ open_visual_sort(void)
 		free(sort_spec[live]);
 	sort_spec[live] = line;
 
-	sort_has_order[live] = 0;
 	sort_pending[live] = 1;
 }
 
@@ -4915,7 +4894,6 @@ handle_metadata_change(File *f)
 	int old_live = live;
 	for (live = 0; live < 2; ++live)
 		if (!file_ordered(f)) {
-			sort_has_order[live] = 0;
 			sort_pending[live] = 1;
 		}
 	live = old_live;
