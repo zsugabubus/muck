@@ -82,6 +82,7 @@ static char const STOP_FOCUS_EVENTS[] = "\033[?1004l";
 
 #define atomic_exchange_lax(...) atomic_exchange_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_add_lax(...) atomic_fetch_add_explicit(__VA_ARGS__, memory_order_relaxed)
+#define atomic_fetch_and_lax(...) atomic_fetch_and_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_or_lax(...) atomic_fetch_or_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_sub_lax(...) atomic_fetch_sub_explicit(__VA_ARGS__, memory_order_relaxed)
 #define atomic_fetch_xor_lax(...) atomic_fetch_xor_explicit(__VA_ARGS__, memory_order_relaxed)
@@ -3107,6 +3108,8 @@ sort_files(void)
 		sel = cur->index[live];
 	else
 		sel = FFMIN(FFMAX(0, sel), n - 1);
+
+	notify_event(EVENT_FILE_CHANGED);
 }
 
 static Expr *
@@ -4948,8 +4951,14 @@ handle_signotify(int sig)
 	if (((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events) &&
 	    atomic_load_lax(&focused))
 	{
-		if (EVENT_FILE_CHANGED & got_events)
+		if (EVENT_FILE_CHANGED & got_events) {
 			draw_files();
+			/* File event can only be generated from tty thread, so
+			 * a spurious and otherwise no-op draw_files() can be
+			 * saved. For example it can occur after sort changed
+			 * and sort_files() notifies us about the change. */
+			atomic_fetch_and_lax(&pending_events, ~EVENT_FILE_CHANGED);
+		}
 
 		if ((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events)
 			draw_status_line();
