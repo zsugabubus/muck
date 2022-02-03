@@ -229,6 +229,7 @@ enum FilterIndex {
 	FILTER_FILES,
 	FILTER_PLAYLISTS,
 	FILTER_CUSTOM_0,
+	FILTER_COUNT = FILTER_CUSTOM_0 + 2,
 };
 
 enum FileType {
@@ -487,13 +488,14 @@ static int64_t _Atomic ALIGNED_ATOMIC cur_pts, cur_duration;
 static int64_t notify_pts, notify_duration;
 static atomic_uchar ALIGNED_ATOMIC paused;
 
-static int32_t nfiles[8];
+static int32_t nfiles[FILTER_COUNT];
 static File **files;
 static int16_t nplaylists;
 static Playlist **playlists;
 
 /* TODO: Queue is live queue has p=^queue$ filter. In non-live mode we can select tracks etc. */
 static int live = 1;
+
 /**
  * .[live] is the currently used filter.
  */
@@ -501,21 +503,20 @@ static uint8_t cur_filter[2] = {
 	FILTER_FILES,
 	FILTER_FILES,
 };
-static Expr *filter_exprs[8];
-
+static Expr *filter_exprs[FILTER_COUNT];
 static char *search_history[10];
 
 static char const DEFAULT_SORT_SPEC[] = "";
-
-static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoOm*z";
 static char *sort_spec[2] = {
 	(char *)DEFAULT_SORT_SPEC,
 	(char *)DEFAULT_SORT_SPEC,
 };
-static int sort_pending[2] = { 1, 1, };
+static int order_changed[2];
 #if WITH_ICU
 static UCollator *sort_ucol;
 #endif
+
+static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoOm*z";
 
 static FILE *tty;
 static atomic_uchar ALIGNED_ATOMIC focused = 1;
@@ -748,8 +749,8 @@ append_file(Playlist *parent, enum FileType type, size_t url_size)
 		.index = { i, i, },
 	};
 
-	sort_pending[0] = 1;
-	sort_pending[1] = 1;
+	order_changed[0] = 1;
+	order_changed[1] = 1;
 
 	return f;
 }
@@ -3044,19 +3045,23 @@ file_cmp(void const *px, void const *py)
 }
 
 static int
-file_ordered(File const *f)
+file_ordered(File const *f, int l)
 {
-	int32_t n = cur_filter[live];
+	/* Indices are good. */
+	if (order_changed[l])
+		return 0;
+
+	int32_t n = cur_filter[l];
 	return
-		(!f->index[live] || file_cmp(&files[f->index[live] - 1], &f) <= 0) &&
-		(nfiles[n] == f->index[live] + 1 || file_cmp(&f, &files[f->index[live] + 1]) <= 0);
+		(!f->index[l] || file_cmp(&files[f->index[l] - 1], &f) <= 0) &&
+		(nfiles[n] == f->index[l] + 1 || file_cmp(&f, &files[f->index[l] + 1]) <= 0);
 }
 
 static void
 load_sort(void)
 {
 	/* Indices are good. */
-	if (sort_pending[live])
+	if (order_changed[live])
 		return;
 
 	/* Initialize unused indices. */
@@ -3074,9 +3079,9 @@ load_sort(void)
 static void
 sort_files(void)
 {
-	if (!sort_pending[live])
+	if (!order_changed[live])
 		return;
-	sort_pending[live] = 0;
+	order_changed[live] = 0;
 
 	uint8_t filter_index = cur_filter[live];
 	uint8_t filter_mask = UINT8_C(1) << filter_index;
@@ -3146,15 +3151,21 @@ fail:
 static void select_file(File *f);
 
 static void
-handle_filter_change(void)
+handle_filter_change(uint8_t filter_index)
 {
-	if (!live)
+	for (int l = 0; l < 2; ++l)
+		order_changed[l] |= filter_index == cur_filter[l];
+
+	if (filter_index != cur_filter[1])
 		return;
 
+	int old_live = live;
+	live = 1;
 	File *f = seek_playlist(0, SEEK_CUR);
 	File *cur = get_playing();
 	if (f && cur && f != cur)
 		select_file(f);
+	live = old_live;
 }
 
 static void
@@ -3177,12 +3188,9 @@ filter_files(ExprParserContext *parser, char const *s)
 		.filter_index = filter_index,
 	});
 
-	sort_pending[0] = 1;
-	sort_pending[1] = 1;
+	handle_filter_change(filter_index);
 
 	notify_event(EVENT_FILE_CHANGED);
-
-	handle_filter_change();
 }
 
 static void
@@ -4017,7 +4025,7 @@ open_visual_sort(void)
 		free(sort_spec[live]);
 	sort_spec[live] = line;
 
-	sort_pending[live] = 1;
+	order_changed[live] = 1;
 }
 
 static void
@@ -4134,6 +4142,7 @@ switch_live(int new_live)
 	/* Keep values on entering visual mode. */
 	cur_filter[0] = cur_filter[1];
 	cur_number[0] = cur_number[1];
+	order_changed[0] = order_changed[1];
 	number_cmd[0] = '\0';
 	number_cmd[1] = '\0';
 
@@ -4872,31 +4881,33 @@ handle_sigexit(int sig)
 static void
 handle_metadata_change(File *f)
 {
-	uint8_t filter_index = cur_filter[live];
-	if (FILTER_CUSTOM_0 <= filter_index) {
+	/* Update f->filter_mask. */
+	for (uint8_t filter_index = FILTER_CUSTOM_0;
+	     filter_index < FILTER_COUNT;
+	     ++filter_index)
+	{
 		Expr *query = filter_exprs[filter_index];
+		if (!query)
+			continue;
+
 		uint8_t filter_mask = UINT8_C(1) << filter_index;
 		int match = expr_eval(query, &(ExprEvalContext const){
 			.f = f,
 			.match_data = re_match_data,
 		});
-		if (match != !!(filter_mask & f->filter_mask)) {
-			f->filter_mask ^= filter_mask;
-			nfiles[filter_index] += match ? 1 : -1;
+		if (match == !!(filter_mask & f->filter_mask))
+			continue;
 
-			sort_pending[0] = 1;
-			sort_pending[1] = 1;
+		f->filter_mask ^= filter_mask;
+		nfiles[filter_index] += match ? 1 : -1;
 
-			handle_filter_change();
-		}
+		handle_filter_change(filter_index);
 	}
 
-	int old_live = live;
-	for (live = 0; live < 2; ++live)
-		if (!file_ordered(f)) {
-			sort_pending[live] = 1;
-		}
-	live = old_live;
+	/* Check whether file order changed. */
+	for (int l = 0; l < 2; ++l)
+		if (!file_ordered(f, l))
+			order_changed[l] = 1;
 
 	if (f == in0.seek_f)
 		update_title();
