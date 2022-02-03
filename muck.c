@@ -3249,16 +3249,16 @@ seek_player(int64_t ts, int whence)
 		birdlock_wr_acquire(&in0.seek_lock)
 	];
 
-	free(e->url);
-	e->url = NULL;
-	e->f = NULL;
-
-	if (SEEK_CUR == whence) {
+	int same_file = e->f == in0.seek_f;
+	if (SEEK_CUR == whence && same_file) {
 		e->ts += ts;
 	} else {
 		e->whence = whence;
 		e->ts = ts;
 	}
+	free(e->url);
+	e->url = NULL;
+	e->f = in0.seek_f;
 
 	birdlock_wr_release(&in0.seek_lock);
 	do_wakeup(&wakeup_source);
@@ -3808,7 +3808,6 @@ play_file(File const *f, int64_t ts)
 
 	in0.seek_f = (File *)f;
 	e->f = (File *)f;
-
 	Playlist *playlist = playlists[f->playlist_index];
 	e->type = f->type;
 	free(e->url);
