@@ -3090,7 +3090,6 @@ sort_files(void)
 {
 	if (!order_changed[live])
 		return;
-	order_changed[live] = 0;
 
 	uint8_t filter_index = cur_filter[live];
 	if (filter_changed[filter_index]) {
@@ -3101,7 +3100,9 @@ sort_files(void)
 			.query = filter_exprs[filter_index],
 			.filter_index = filter_index,
 		});
-	}
+	} else if ('r' == seek_cmd)
+		return;
+	order_changed[live] = 0;
 
 	uint8_t filter_mask = UINT8_C(1) << filter_index;
 	int32_t n = nfiles[filter_index];
