@@ -33,6 +33,7 @@ _Static_assert(8 == CHAR_BIT);
 #include <libavutil/frame.h>
 
 #include "birdlock.h"
+#include "repeat.h"
 #include "rnd.h"
 
 #include "config.h"
@@ -199,15 +200,21 @@ static uint8_t const METADATA_COLUMN_WIDTHS[] = {
 #undef xmacro
 };
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverride-init"
 /* Adding +1 is safe because we have MX_NB so it will not overflow. */
-static enum MetadataX const METADATA_LUT[UINT8_MAX + 1] = {
-#define xmacro(letter, name, ...) [letter] = 1 /* Heck. */ + M_##name,
+static enum MetadataX const METADATA_FROM_U8[UINT8_MAX + 1] = {
+#define xmacro(i) [i] = MX_NB,
+	REPEAT256(0)
+#undef xmacro
+#define xmacro(letter, name, ...) [letter] = (enum MetadataX)M_##name,
 	METADATA
 #undef xmacro
-#define xmacro(letter, name, ...) [letter] = 1 /* Heck. */ + MX_##name,
+#define xmacro(letter, name, ...) [letter] = MX_##name,
 	METADATAX
 #undef xmacro
 };
+#pragma GCC diagnostic pop
 
 /* May present in URL if not among tags. */
 static uint64_t const METADATA_IN_URL =
@@ -2343,8 +2350,8 @@ expr_parse_kv(ExprParserContext *parser)
 	while (('a' <= *parser->ptr && *parser->ptr <= 'z') ||
 	       ('A' <= *parser->ptr && *parser->ptr <= 'Z'))
 	{
-		enum MetadataX m = METADATA_LUT[(uint8_t)*parser->ptr];
-		if (!m--) {
+		enum MetadataX m = METADATA_FROM_U8[(uint8_t)*parser->ptr];
+		if (MX_NB == m) {
 			parser->error_msg = "Unknown key";
 			goto fail;
 		}
@@ -2954,8 +2961,8 @@ file_cmp(void const *px, void const *py)
 	for (char const *s = sort_spec[live]; *s; ++s) {
 		int cmp = 0;
 
-		enum MetadataX m = METADATA_LUT[(uint8_t)*s];
-		if (!m--) {
+		enum MetadataX m = METADATA_FROM_U8[(uint8_t)*s];
+		if (MX_NB == m) {
 			print_error("invalid sort specifier '%c'", *s);
 			break;
 		}
@@ -4546,8 +4553,8 @@ draw_files(void)
 		char *end;
 		int n = strtol(s, &end, 10);
 
-		enum MetadataX m = METADATA_LUT[(uint8_t)*end];
-		if (!m--)
+		enum MetadataX m = METADATA_FROM_U8[(uint8_t)*end];
+		if (MX_NB == m)
 			break;
 
 		if (s == end) {
