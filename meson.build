@@ -18,41 +18,20 @@ add_project_arguments([
 	),
 ], language: 'c')
 
-cc = meson.get_compiler('c')
-
-ffmpeg_dir = meson.source_root() / 'ffmpeg'
-ffmpeg_link_args = []
-foreach lib: ['swresample', 'swscale', 'avcodec', 'avdevice', 'avformat', 'avutil', 'avfilter']
-	ffmpeg_link_args += [
-		'-L' + ffmpeg_dir / 'lib' + lib / '',
-		'-l' + lib,
-	]
-endforeach
 ffmpeg_dep = declare_dependency(
-	link_args: ffmpeg_link_args + ['-lstdc++'],
-	compile_args: ['-isystem', ffmpeg_dir],
 	dependencies: [
-
-		cc.find_library('dl'),
-		cc.find_library('m'),
-		dependency('alsa'),
-		dependency('bzip2'),
-		dependency('libva-drm'),
-		dependency('libva-x11'),
-		dependency('libxml-2.0'),
-		dependency('openssl'),
-		dependency('opus'),
-		dependency('threads'),
-		dependency('vdpau'),
-		dependency('x11'),
-		dependency('zlib'),
-		dependency('ncursesw'),
-		dependency('libpcre2-8'),
-
+		dependency('libavcodec'),
+		dependency('libavdevice'),
+		dependency('libavformat'),
+		dependency('libavutil'),
+		dependency('libavfilter'),
 	],
 )
 
+icu_dep = dependency('icu-i18n', required: get_option('unicode'))
+
 config = configuration_data()
+cc = meson.get_compiler('c')
 
 foreach fn: ['pthread_setname_np']
 	config.set10('HAVE_' + fn.to_upper(), cc.has_function(
@@ -75,7 +54,6 @@ endforeach
 
 config.set10('CONFIG_VALGRIND', get_option('buildtype').contains('debug'))
 
-icu_dep = dependency('icu-i18n', required: get_option('unicode'))
 config.set10('WITH_ICU', icu_dep.found())
 
 configure_file(output: 'config.h', configuration: config)
@@ -92,6 +70,8 @@ executable('muck',
 	dependencies: [
 		ffmpeg_dep,
 		icu_dep,
+		dependency('ncursesw'),
+		dependency('libpcre2-8'),
 	],
 	install: true,
 )

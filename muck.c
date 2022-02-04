@@ -28,7 +28,6 @@ _Static_assert(8 == CHAR_BIT);
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
-#include <libavformat/url.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
 
@@ -620,9 +619,8 @@ notify_averror(char const *msg, int err)
 static enum FileType
 probe_url(Playlist const *parent, char const *url)
 {
-	URLComponents uc;
-	if (0 <= ff_url_decompose(&uc, url, NULL) &&
-	    uc.scheme < uc.path)
+	char const *colon = strchr(url, ':');
+	if (colon && colon < strchr(url, '/'))
 		return F_URL;
 
 	if (parent) {
@@ -2760,7 +2758,7 @@ for_each_file_par(int (*routine)(TaskWorker *, void const *), void const *arg)
 	static long ncpus;
 	if (!ncpus) {
 		ncpus = sysconf(_SC_NPROCESSORS_ONLN);
-		ncpus = FFCLAMP(1, ncpus, FF_ARRAY_ELEMS(((Task *)0)->workers));
+		ncpus = FFCLAMP(1, ncpus, (long)FF_ARRAY_ELEMS(((Task *)0)->workers));
 	}
 
 	Task task;
