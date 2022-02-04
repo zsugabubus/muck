@@ -4440,13 +4440,18 @@ do_key(int c)
 		break;
 
 	case CONTROL('M'):
-		if (0 <= sel) {
-			int old_live = live;
-			live = 1;
-			select_file(files[sel]);
-			live = old_live;
-		}
+	{
+		File *f = seek_playlist(0, SEEK_CUR);
+		if (!f)
+			break;
+
+		int old_live = live;
+		live = 1;
+		select_file(f);
+		live = old_live;
+
 		pause_player(0);
+	}
 		break;
 
 	case 'Z': /* Zzz. */
