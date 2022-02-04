@@ -512,6 +512,7 @@ static uint8_t cur_filter[2] = {
 	FILTER_FILES,
 };
 static Expr *filter_exprs[FILTER_COUNT];
+static int filter_changed[FILTER_COUNT];
 static char *search_history[10];
 
 static char const DEFAULT_SORT_SPEC[] = "";
@@ -3092,6 +3093,16 @@ sort_files(void)
 	order_changed[live] = 0;
 
 	uint8_t filter_index = cur_filter[live];
+	if (filter_changed[filter_index]) {
+		filter_changed[filter_index] = 0;
+		/* TODO: Cache filters. */
+		nfiles[filter_index] = 0;
+		(void)for_each_file_par(match_file_worker, &(MatchFileContext){
+			.query = filter_exprs[filter_index],
+			.filter_index = filter_index,
+		});
+	}
+
 	uint8_t filter_mask = UINT8_C(1) << filter_index;
 	int32_t n = nfiles[filter_index];
 	File *cur = 0 <= sel ? files[sel] : NULL;
@@ -3191,16 +3202,9 @@ filter_files(ExprParserContext *parser, char const *s)
 	expr_free(filter_exprs[filter_index]);
 	filter_exprs[filter_index] = query;
 
-	/* TODO: Cache filters. */
-	nfiles[filter_index] = 0;
-	(void)for_each_file_par(match_file_worker, &(MatchFileContext const){
-		.query = query,
-		.filter_index = filter_index,
-	});
+	filter_changed[filter_index] = 1;
 
 	handle_filter_change(filter_index);
-
-	notify_event(EVENT_FILE_CHANGED);
 }
 
 static void
