@@ -37,6 +37,14 @@ _Static_assert(8 == CHAR_BIT);
 
 #include "config.h"
 
+#define FEATURES \
+	/* xmacro(flag, name) */ \
+	xmacro(WITH_ICU, "icu")
+
+#define FEATURE_HAVE0 "-"
+#define FEATURE_HAVE1 "+"
+#define FEATURE_HAVE(flag) FEATURE_HAVE##flag
+
 #if WITH_ICU
 # include <unicode/ucol.h>
 # include <unicode/parseerr.h>
@@ -48,7 +56,7 @@ _Static_assert(8 == CHAR_BIT);
 # define xassert(c) ((void)(c))
 #endif
 
-#ifdef HAVE___BUILTIN_EXPECT
+#if HAVE___BUILTIN_EXPECT
 # define likely(x) __builtin_expect(!!(x), 1)
 # define unlikely(x) __builtin_expect(!!(x), 0)
 #else
@@ -59,6 +67,10 @@ _Static_assert(8 == CHAR_BIT);
 #if !HAVE_PTHREAD_SETNAME_NP
 # define pthread_setname_np(...) (void)0
 #endif
+
+#define FLAG0 "+"
+#define FLAG1 "+"
+#define FEATURE_STR(ICU)
 
 #if !HAVE_STRCHRNUL
 static char *
@@ -5162,7 +5174,10 @@ main(int argc, char **argv)
 			break;
 
 		case 'v':
+#define xmacro(flag, name) " " FEATURE_HAVE(flag) name
 			puts(MUCK_VERSION);
+			puts("Features:" FEATURES);
+#undef xmacor
 			exit(EXIT_SUCCESS);
 
 		default:
