@@ -2953,8 +2953,8 @@ seek_playlist(int32_t pos, int whence)
 	}
 
 	pos %= n;
-	pos += n;
-	pos %= n;
+	if (pos < 0)
+		pos += n;
 
 	return files[pos];
 }
