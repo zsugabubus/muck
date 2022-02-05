@@ -704,12 +704,12 @@ plumb_file(File const *f, uint8_t filter_index, FILE *stream)
 	fputc('\n', stream);
 }
 
-static void sort_files(void);
+static File *seek_playlist(int32_t pos, int whence);
 
 static void
 plumb_files(FILE *stream)
 {
-	sort_files();
+	(void)seek_playlist(0, SEEK_CUR);
 
 	fputs("path", stream);
 	for (enum Metadata i = 0; i < M_NB; ++i) {
@@ -2917,6 +2917,8 @@ get_playing(void)
 {
 	return in0.seek_f;
 }
+
+static void sort_files(void);
 
 static int32_t const POS_RND = INT32_MIN;
 
