@@ -1241,7 +1241,10 @@ playlist_read_m3u(Playlist *playlist, int fd)
 
 out:
 	if (error_msg) {
-		print_playlist_error(playlist, 31, error_msg, lnum, col ? col - buf + 1 : 0);
+		notify_msg("%s:%zu:%zu: %s",
+				playlist->name,
+				lnum, col ? (size_t)(col - buf) + 1 : 0,
+				error_msg);
 		/* Try do our best, so just mark it as read-only. This avoids
 		 * writing back any faulty data. */
 		playlist->read_only = 1;
