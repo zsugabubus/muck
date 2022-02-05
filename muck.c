@@ -779,22 +779,6 @@ playlist_alloc(File const *f, char const *name)
 	return playlist;
 }
 
-static void
-print_playlist_error(Playlist const *playlist, int color, char const *msg, size_t lnum, size_t col)
-{
-	flockfile(stderr);
-	fprintf(stderr, "\033[1;%dm", color);
-	fputs(playlist->name, stderr);
-	fputs(":", stderr);
-	if (lnum) {
-		fprintf(stderr, "%zu:", lnum);
-		if (col)
-			fprintf(stderr, "%zu:", col);
-	}
-	fprintf(stderr, " %s\033[m\n", msg);
-	funlockfile(stderr);
-}
-
 static inline Playlist *
 file_get_playlist(File const *f)
 {
@@ -1200,7 +1184,6 @@ playlist_read_m3u(Playlist *playlist, int fd)
 					goto out;
 				}
 			} else {
-				print_playlist_error(playlist, 0, "Unknown comment", lnum, 0);
 				playlist->read_only = 1;
 			}
 
@@ -1249,9 +1232,6 @@ out:
 		 * writing back any faulty data. */
 		playlist->read_only = 1;
 	}
-
-	if (playlist->read_only)
-		print_playlist_error(playlist, 0, "Opened read-only", 0, 0);
 
 	close(fd);
 }
