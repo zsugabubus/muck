@@ -13,7 +13,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <sys/xattr.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -272,6 +271,13 @@ typedef struct {
 	uint16_t metadata[M_NB]; /* x => url + metadata[x]; 0 if key not present. */
 } File;
 
+typedef struct {
+	File f;
+	char buf[UINT16_MAX];
+	size_t urlsz;
+	size_t sz;
+} FileData;
+
 typedef struct Playlist Playlist;
 struct Playlist {
 	File const *f;
@@ -444,9 +450,13 @@ struct Task {
 	TaskWorker workers[64];
 };
 
+typedef struct {
+	char pathname[PATH_MAX];
+} TemporaryFile;
+
 static pthread_t main_thread;
 static pthread_t source_thread, sink_thread;
-static int wakeup_source, wakeup_sink;
+static int source_cond, sink_cond;
 #if CONFIG_VALGRIND
 static int threads_inited;
 static atomic_uchar ALIGNED_ATOMIC terminate;
@@ -477,9 +487,9 @@ static int graph_volume_volume; /**< Configured state of [volume]volume= */
  * - Producer: Buffer needs to be refilled again.
  * - Consumer: New frames available after buffer being emptied.
  */
-static pthread_cond_t buffer_wakeup = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
 /**
- * Only to protect buffer_wakeup. buffer_* uses atomic (i.e. lockless) operations
+ * Only to protect buffer_cond. buffer_* uses atomic (i.e. lockless) operations
  * otherwise.
  */
 static pthread_mutex_t buffer_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -552,9 +562,9 @@ static unsigned cur_track;
 static char seek_cmd = 'n';
 static RndState rnd;
 
-static char info_msg[2][128];
-static uint8_t info_rd;
-static BirdLock info_msg_lock;
+static char user_msg[2][128];
+static uint8_t user_msg_rd;
+static BirdLock user_msg_lock;
 
 static char config_home[PATH_MAX];
 static char cover_path[PATH_MAX];
@@ -587,16 +597,16 @@ print_error(char const *msg, ...)
 static void
 notify_msg(char const *format, ...)
 {
-	char *buf = info_msg[
-		birdlock_wr_acquire(&info_msg_lock)
+	char *buf = user_msg[
+		birdlock_wr_acquire(&user_msg_lock)
 	];
 
 	va_list ap;
 	va_start(ap, format);
-	vsnprintf(buf, sizeof info_msg[0], format, ap);
+	vsnprintf(buf, sizeof user_msg[0], format, ap);
 	va_end(ap);
 
-	birdlock_wr_release(&info_msg_lock);
+	birdlock_wr_release(&user_msg_lock);
 
 	notify_event(EVENT_STATE_CHANGED);
 }
@@ -680,50 +690,6 @@ fd2dirname(int fd, char dirbuf[static PATH_MAX])
 		strcpy(dirbuf, "(error)");
 }
 
-static void
-plumb_file(File const *f, uint8_t filter_index, FILE *stream)
-{
-	if (!(f->filter_mask & (UINT8_C(1) << filter_index)))
-		return;
-
-	Playlist *playlist = playlists[f->playlist_index];
-	if (F_FILE == f->type &&
-	    '/' != *f->url)
-	{
-		fputs(playlist->dirname, stream);
-		fputc('/', stream);
-	}
-	fputs(f->url, stream);
-
-	for (enum Metadata i = 0; i < M_NB; ++i) {
-		fputc('\t', stream);
-		if (f->metadata[i])
-			fputs(f->url + f->metadata[i], stream);
-	}
-
-	fputc('\n', stream);
-}
-
-static File *seek_playlist(int32_t pos, int whence);
-
-static void
-plumb_files(FILE *stream)
-{
-	(void)seek_playlist(0, SEEK_CUR);
-
-	fputs("path", stream);
-	for (enum Metadata i = 0; i < M_NB; ++i) {
-		fputc('\t', stream);
-		fputs(METADATA_NAMES[i], stream);
-	}
-	fputc('\n', stream);
-
-	int32_t filter_index = cur_filter[live];
-	int32_t n = nfiles[filter_index];
-	for (int32_t i = 0; i < n; ++i)
-		plumb_file(files[i], filter_index, stream);
-}
-
 static int
 ensure_size1(void *pp, int32_t nmemb, int32_t size)
 {
@@ -740,13 +706,13 @@ ensure_size1(void *pp, int32_t nmemb, int32_t size)
 }
 
 static File *
-append_file(Playlist *parent, enum FileType type, size_t url_size)
+playlist_new_file(Playlist *parent, enum FileType type, size_t urlsz)
 {
 	if (ensure_size1(&files, nfiles[FILTER_ALL], sizeof *files))
 		return NULL;
 
 	File *f = malloc(sizeof *f);
-	char *url = malloc(url_size);
+	char *url = malloc(urlsz);
 	if (!f || !url) {
 		notify_strerror_oom();
 		free(f);
@@ -775,17 +741,17 @@ append_file(Playlist *parent, enum FileType type, size_t url_size)
 }
 
 static File *
-append_file_dupurl(Playlist *parent, enum FileType type, char const *url)
+playlist_new_file_dupurl(Playlist *parent, enum FileType type, char const *url)
 {
 	size_t sz = strlen(url) + 1 /* NUL */;
-	File *f = append_file(parent, type, sz);
+	File *f = playlist_new_file(parent, type, sz);
 	if (f)
 		memcpy(f->url, url, sz);
 	return f;
 }
 
 static Playlist *
-append_playlist(File const *f, char const *name)
+playlist_alloc(File const *f, char const *name)
 {
 	assert(!f || F_FILE < f->type);
 
@@ -829,25 +795,253 @@ print_playlist_error(Playlist const *playlist, int color, char const *msg, size_
 	funlockfile(stderr);
 }
 
-static void
-read_file(File *f);
+static inline Playlist *
+file_get_playlist(File const *f)
+{
+	return playlists[f->playlist_index];
+}
+
+static inline Playlist *
+playlist_get_parent(Playlist const *playlist)
+{
+	return file_get_playlist(playlist->f);
+}
 
 static void
-read_playlist_m3u(Playlist *playlist, int fd)
+fdata_reset(FileData *fdata, size_t urlsz)
+{
+	for (enum Metadata i = 0; i < M_NB; ++i)
+		fdata->f.metadata[i] = 0;
+	fdata->urlsz = urlsz;
+	fdata->sz = fdata->urlsz;
+}
+
+static void
+fdata_reset_with_url(FileData *fdata, char const *url)
+{
+	fdata_reset(fdata, strlen(url) + 1 /* NUL */);
+}
+
+static int
+fdata_write_date(FileData *fdata, enum Metadata m, time_t time)
+{
+	size_t size = sizeof fdata->buf - fdata->sz;
+	int n = strftime(fdata->buf + fdata->sz, size, "%F", gmtime(&time));
+	if (!n)
+		return -ENOSPC;
+
+	fdata->f.metadata[m] = fdata->sz;
+	fdata->buf[fdata->sz + n] = '\0';
+	fdata->sz += n + 1 /* NUL */;
+
+	return 0;
+}
+
+static int
+fdata_writef(FileData *fdata, enum Metadata m, char const *format, ...)
+{
+	va_list ap;
+
+	va_start(ap, format);
+	size_t rem = sizeof fdata->buf - fdata->sz;
+	int n = vsnprintf(fdata->buf + fdata->sz, rem, format, ap);
+	va_end(ap);
+
+	if (rem <= (size_t)n)
+		return -ENOSPC;
+	if (!n)
+		return 0;
+
+	fdata->f.metadata[m] = fdata->sz;
+	fdata->sz += n + 1 /* NUL */;
+
+	return 0;
+}
+
+static int
+fdata_write_basic(FileData *fdata, MetadataEvent const *e)
+{
+	char buf[128];
+	int rc;
+	av_get_channel_layout_string(buf, sizeof buf,
+			e->channels,
+			e->channel_layout);
+	rc = fdata_writef(fdata, M_codec,
+			"%s-%s-%d",
+			e->codec_name,
+			buf,
+			e->sample_rate / 1000);
+	if (rc < 0)
+		return rc;
+
+	if (e->cover_codec_id) {
+		rc = fdata_writef(fdata, M_cover_codec,
+				"%s-%d",
+				avcodec_get_name(e->cover_codec_id),
+				e->cover_width);
+		if (rc < 0)
+			return rc;
+	}
+
+	/* Preserve. */
+	if (e->f->metadata[M_comment]) {
+		int rc = fdata_writef(fdata, M_comment,
+				"%s", e->f->url + e->f->metadata[M_comment]);
+		if (rc < 0)
+			return rc;
+	}
+
+	return 0;
+}
+
+static int
+fdata_write(FileData *fdata, enum Metadata m, char const *value)
+{
+	size_t old_fdata_size = fdata->sz;
+	int any = !!fdata->f.metadata[m];
+
+	if (!any) {
+		fdata->f.metadata[m] = fdata->sz;
+	} else {
+		switch (m) {
+		case M_track:
+		case M_disc:
+			/* Multiplicity is not supported because fdata was may
+			 * be interrupted with M_*_total part. */
+			return 0;
+
+		default:
+			fdata->buf[fdata->sz - 1] = ';';
+			break;
+		}
+	}
+
+	char pc = '\0';
+	for (;; ++value) {
+		if (sizeof fdata->buf <= fdata->sz)
+			return -1;
+		if (!*value)
+			break;
+		char c = (unsigned char)*value < ' ' ? ' ' : *value;
+		switch (m) {
+		default:
+			/* Nothing. */
+			break;
+
+		case M_track:
+		case M_disc:
+			if ('/' == c)
+				goto eos;
+			/* FALLTHROUGH */
+		case M_track_total:
+		case M_disc_total:
+		case M_date:
+		case M_bpm:
+			/* Trim leading zeros. */
+			if (!pc && '0' == c)
+				continue;
+		}
+		if ((!pc || ' ' == pc) && ' ' == c)
+			continue;
+		fdata->buf[fdata->sz++] = c;
+		pc = c;
+	}
+eos:
+	fdata->sz -= ' ' == pc;
+	if (old_fdata_size == fdata->sz) {
+	rollback:
+		if (!any)
+			fdata->f.metadata[m] = 0;
+		else
+			fdata->buf[old_fdata_size] = '\0';
+		return 0;
+	}
+	fdata->buf[fdata->sz++] = '\0';
+
+	if (M_date == m &&
+	    fdata->sz - old_fdata_size == 8 + 1 /* NUL */)
+	{
+		if (sizeof fdata->buf <= fdata->sz + 2)
+			return -1;
+
+		/*-    543210
+		 * 11112233Z
+		 * 1111-22-33Z
+		 *          ^*/
+		memmove(&fdata->buf[fdata->sz - 1], &fdata->buf[fdata->sz - 3], 3);
+		memmove(&fdata->buf[fdata->sz - 4], &fdata->buf[fdata->sz - 5], 2);
+		fdata->buf[fdata->sz - 2] = '-';
+		fdata->buf[fdata->sz - 5] = '-';
+		fdata->sz += 2;
+	}
+
+	/* Use most precise date. */
+	if (M_date == m && any) {
+		if (old_fdata_size - fdata->f.metadata[m] < fdata->sz - old_fdata_size) {
+			memmove(&fdata->buf[fdata->f.metadata[m]],
+					&fdata->buf[old_fdata_size],
+					fdata->sz - old_fdata_size);
+			fdata->sz = old_fdata_size;
+		} else {
+			goto rollback;
+		}
+	}
+
+	if (*value) {
+		assert(M_track == m || M_disc == m);
+		assert('/' == *value);
+		enum Metadata totalm = M_disc == m
+			? M_disc_total
+			: M_track_total;
+		return fdata_write(fdata, totalm, value + 1);
+	}
+
+	return 0;
+}
+
+static int
+fdata_save(FileData const *fdata, File *f)
+{
+	Playlist *playlist = file_get_playlist(f);
+
+	if (!playlist->modified) {
+		for (enum Metadata i = 0; i < M_NB; ++i)
+			if (!!fdata->f.metadata[i] != !!f->metadata[i] ||
+			    (fdata->f.metadata[i] &&
+			     strcmp(fdata->buf + fdata->f.metadata[i], f->url + f->metadata[i])))
+				goto changed;
+		return 0;
+	changed:
+	}
+
+	void *p = malloc(fdata->sz);
+	if (!p)
+		return -ENOMEM;
+
+	playlist->modified = 1;
+
+	memcpy(p, f->url, fdata->urlsz);
+	memcpy(p + fdata->urlsz, fdata->buf + fdata->urlsz, fdata->sz - fdata->urlsz);
+
+	free(f->url);
+	f->url = p;
+
+	memcpy(f->metadata, fdata->f.metadata, sizeof f->metadata);
+
+	return 0;
+}
+
+static void file_read(File *f);
+
+static void
+playlist_read_m3u(Playlist *playlist, int fd)
 {
 	char const *error_msg = NULL;
 
-	File file;
-
-	char fdata[UINT16_MAX];
-	size_t fdata_size;
-#define RESET_FDATA \
-	for (enum Metadata i = 0; i < M_NB; ++i) \
-		file.metadata[i] = UINT16_MAX; \
-	fdata_size = 0;
+	FileData fdata;
 
 	char buf[UINT16_MAX];
-	uint16_t buf_size = 0;
+	uint16_t bufsz = 0;
 	char *line = buf;
 
 	int is_m3u = 0;
@@ -855,35 +1049,35 @@ read_playlist_m3u(Playlist *playlist, int fd)
 	size_t lnum = 1;
 	char *col;
 
-	RESET_FDATA;
+	fdata_reset(&fdata, 1);
 
 	for (;;) {
 		col = NULL;
 
 		char *line_end;
-		while (!(line_end = memchr(line, '\n', buf_size))) {
-			if (sizeof buf - 1 == buf_size) {
+		while (!(line_end = memchr(line, '\n', bufsz))) {
+			if (sizeof buf - 1 == bufsz) {
 				error_msg = "Too long line";
 				goto out;
 			}
 
-			memmove(buf, line, buf_size);
+			memmove(buf, line, bufsz);
 			line = buf;
 
-			ssize_t len = read(fd, buf + buf_size, (sizeof buf - 1) - buf_size);
+			ssize_t len = read(fd, buf + bufsz, (sizeof buf - 1) - bufsz);
 			if (len < 0) {
 				error_msg = "Cannot read playlist stream";
 				goto out;
 			} else if (!len) {
-				if (!buf_size)
+				if (!bufsz)
 					goto out;
 
-				line_end = buf + buf_size;
-				++buf_size;
+				line_end = buf + bufsz;
+				++bufsz;
 				break;
 			}
 
-			buf_size += len;
+			bufsz += len;
 		}
 
 		*line_end = '\0';
@@ -896,18 +1090,18 @@ read_playlist_m3u(Playlist *playlist, int fd)
 	 (col = line + 1 + strlen(directive)))
 
 			if (IS_DIRECTIVE("EXTINF:")) {
-				RESET_FDATA;
+				fdata_reset(&fdata, 1);
 
-				file.metadata[M_length] = 0;
+				fdata.f.metadata[M_length] = fdata.sz;
 				while ('0' <= *col && *col <= '9') {
-					if (sizeof fdata - 1 < fdata_size) {
+					if (sizeof fdata.buf - 1 < fdata.sz) {
 					fail_too_long:
 						error_msg = "Too much data";
 						goto out;
 					}
-					fdata[fdata_size++] = *col++;
+					fdata.buf[fdata.sz++] = *col++;
 				}
-				fdata[fdata_size++] = '\0';
+				fdata.buf[fdata.sz++] = '\0';
 
 				for (;;) {
 					while (' ' == *col)
@@ -950,7 +1144,7 @@ read_playlist_m3u(Playlist *playlist, int fd)
 					}
 					++col;
 
-					file.metadata[m] = fdata_size;
+					fdata.f.metadata[m] = fdata.sz;
 					for (;;) {
 						if ('"' == *col) {
 							++col;
@@ -963,11 +1157,11 @@ read_playlist_m3u(Playlist *playlist, int fd)
 							goto out;
 						}
 
-						if (sizeof fdata - 1 < fdata_size)
+						if (sizeof fdata.buf - 1 < fdata.sz)
 							goto fail_too_long;
-						fdata[fdata_size++] = *col++;
+						fdata.buf[fdata.sz++] = *col++;
 					}
-					fdata[fdata_size++] = '\0';
+					fdata.buf[fdata.sz++] = '\0';
 				}
 
 				if (*col) {
@@ -982,7 +1176,7 @@ read_playlist_m3u(Playlist *playlist, int fd)
 					goto out;
 				}
 
-				Playlist *parent = playlists[playlist->f->playlist_index];
+				Playlist *parent = playlist_get_parent(playlist);
 
 				close(playlist->dirfd);
 				playlist->dirfd = openat(
@@ -1013,30 +1207,30 @@ read_playlist_m3u(Playlist *playlist, int fd)
 #undef IS_DIRECTIVE
 		} else if (*line) {
 			char const *url = line;
-			size_t url_size = line_end - line + 1 /* NUL */;
+			size_t urlsz = line_end - line + 1 /* NUL */;
 
-			if (sizeof fdata < url_size + fdata_size)
+			if (sizeof fdata.buf < urlsz + (fdata.sz - 1 /* Reserved */))
 				goto fail_too_long;
 
 			enum FileType type = probe_url(NULL, url);
-			File *f = append_file(playlist, type, url_size + fdata_size);
+			File *f = playlist_new_file(playlist, type, urlsz + (fdata.sz - 1));
 			if (!f)
 				goto fail_enomem;
 
 			for (enum Metadata i = 0; i < M_NB; ++i)
-				f->metadata[i] = UINT16_MAX != file.metadata[i]
-					? url_size + file.metadata[i]
+				f->metadata[i] = fdata.f.metadata[i]
+					? urlsz + fdata.f.metadata[i] - 1
 					: 0;
 
-			memcpy(f->url, url, url_size);
-			memcpy(f->url + url_size, fdata, fdata_size);
+			memcpy(f->url, url, urlsz);
+			memcpy(f->url + urlsz, fdata.buf + 1, fdata.sz - 1);
 
-			read_file(f);
-			RESET_FDATA;
+			file_read(f);
+			fdata_reset(&fdata, 1);
 		}
 
 		++line_end; /* Skip LF. */
-		buf_size -= line_end - line;
+		bufsz -= line_end - line;
 		line = line_end;
 		++lnum;
 	}
@@ -1057,12 +1251,10 @@ out:
 		print_playlist_error(playlist, 0, "Opened read-only", 0, 0);
 
 	close(fd);
-
-#undef RESET_FDATA
 }
 
 static void
-read_playlist_dir(Playlist *playlist, int fd)
+playlist_read_dir(Playlist *playlist, int fd)
 {
 	playlist->dirfd = fd;
 	playlist->dirname = strdup(playlist->f->url);
@@ -1079,8 +1271,8 @@ read_playlist_dir(Playlist *playlist, int fd)
 			continue;
 
 		enum FileType type = probe_url(NULL, name);
-		File *f = append_file_dupurl(playlist, type, name);
-		read_file(f);
+		File *f = playlist_new_file_dupurl(playlist, type, name);
+		file_read(f);
 	}
 
 	closedir(dir);
@@ -1097,7 +1289,7 @@ reap(pid_t pid)
 }
 
 static void
-compress_playlist(Playlist *playlist, int *playlist_fd, pid_t *pid, int do_compress)
+playlist_pipe_compress(Playlist *playlist, int *playlist_fd, pid_t *pid, int do_compress)
 {
 	int pipes[2] = { -1, -1 };
 
@@ -1123,7 +1315,7 @@ compress_playlist(Playlist *playlist, int *playlist_fd, pid_t *pid, int do_compr
 }
 
 static void
-read_playlist(Playlist *playlist, int fd)
+playlist_read(Playlist *playlist, int fd)
 {
 	switch (playlist->f->type) {
 	case F_PLAYLIST:
@@ -1135,7 +1327,7 @@ read_playlist(Playlist *playlist, int fd)
 
 		char const *dirname = slash ? playlist->f->url : ".";
 
-		Playlist *parent = playlists[playlist->f->playlist_index];
+		Playlist *parent = playlist_get_parent(playlist);
 		playlist->dirfd = openat(parent->dirfd, dirname,
 				O_CLOEXEC | O_PATH | O_RDONLY | O_DIRECTORY);
 		if (playlist->dirfd < 0)
@@ -1146,9 +1338,9 @@ read_playlist(Playlist *playlist, int fd)
 
 		pid_t pid = -1;
 		if (F_PLAYLIST_COMPRESSED == playlist->f->type)
-			compress_playlist(playlist, &fd, &pid, 0);
+			playlist_pipe_compress(playlist, &fd, &pid, 0);
 
-		read_playlist_m3u(playlist, fd);
+		playlist_read_m3u(playlist, fd);
 
 		if (0 <= pid)
 			reap(pid);
@@ -1156,7 +1348,7 @@ read_playlist(Playlist *playlist, int fd)
 		break;
 
 	case F_PLAYLIST_DIRECTORY:
-		read_playlist_dir(playlist, fd);
+		playlist_read_dir(playlist, fd);
 		break;
 
 	default:
@@ -1165,29 +1357,29 @@ read_playlist(Playlist *playlist, int fd)
 }
 
 static void
-read_file(File *f)
+file_read(File *f)
 {
 	if (f->type <= F_FILE)
 		return;
 
-	Playlist *parent = playlists[f->playlist_index];
+	Playlist *parent = file_get_playlist(f);
 	int fd = openat(parent->dirfd, f->url, O_CLOEXEC | O_RDONLY);
 	if (fd < 0) {
 		notify_msg("Cannot open '%s': %s", f->url, strerror(errno));
 		return;
 	}
 
-	Playlist *playlist = append_playlist(f, f->url);
+	Playlist *playlist = playlist_alloc(f, f->url);
 	if (!playlist) {
 		close(fd);
 		return;
 	}
 
-	read_playlist(playlist, fd);
+	playlist_read(playlist, fd);
 }
 
 static void
-write_file(File const *f, FILE *stream)
+file_write_m3u(File const *f, FILE *stream)
 {
 	int any = 0;
 	for (enum Metadata i = 0; i < M_NB; ++i) {
@@ -1218,7 +1410,7 @@ write_file(File const *f, FILE *stream)
 }
 
 static void
-write_playlist(Playlist *playlist, FILE *stream)
+playlist_write_m3u(Playlist *playlist, FILE *stream)
 {
 	fprintf(stream, "#EXTM3U\n");
 	if (playlist->name)
@@ -1230,13 +1422,13 @@ write_playlist(Playlist *playlist, FILE *stream)
 			continue;
 
 		if (f->type <= F_FILE)
-			write_file(f, stream);
+			file_write_m3u(f, stream);
 		fprintf(stream, "%s\n", f->url);
 	}
 }
 
 static void
-save_playlist(Playlist *playlist)
+playlist_save(Playlist *playlist)
 {
 	if (playlist->read_only ||
 	    !playlist->modified)
@@ -1249,7 +1441,7 @@ save_playlist(Playlist *playlist)
 	FILE *stream = NULL;
 	pid_t pid = -1;
 
-	int dirfd = playlists[playlist->f->playlist_index]->dirfd;
+	int dirfd = playlist_get_parent(playlist)->dirfd;
 	if (ssprintf(tmp, "%s~", playlist->f->url) < 0 ||
 	    (fd = openat(dirfd, tmp, O_CLOEXEC | O_WRONLY | O_TRUNC | O_CREAT, 0666)) < 0)
 	{
@@ -1258,7 +1450,7 @@ save_playlist(Playlist *playlist)
 	}
 
 	if (F_PLAYLIST_COMPRESSED == playlist->f->type)
-		compress_playlist(playlist, &fd, &pid, 1);
+		playlist_pipe_compress(playlist, &fd, &pid, 1);
 
 	stream = fdopen(fd, "w");
 	if (!stream) {
@@ -1270,7 +1462,7 @@ save_playlist(Playlist *playlist)
 	char buf[UINT16_MAX + 1];
 	setbuffer(stream, buf, sizeof buf);
 
-	write_playlist(playlist, stream);
+	playlist_write_m3u(playlist, stream);
 
 	if (fflush(stream), ferror(stream)) {
 		error_msg = "Cannot write playlist";
@@ -1335,7 +1527,7 @@ close_graph(void)
 }
 
 static void
-close_input(Input *in)
+input_close(Input *in)
 {
 	if (in->s.codec_ctx)
 		avcodec_free_context(&in->s.codec_ctx);
@@ -1347,181 +1539,22 @@ close_input(Input *in)
 		close(in->fd);
 }
 
-static int
-fdata_write_date(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, time_t time)
+static void
+input_destroy(Input *in)
 {
-	size_t size = UINT16_MAX - *fdata_size;
-	int n = strftime(fdata + *fdata_size, size, "%F", gmtime(&time));
-	if (!n)
-		return -1;
+	input_close(in);
 
-	tmpf->metadata[m] = *fdata_size;
-	fdata[*fdata_size + n] = '\0';
-	*fdata_size += n + 1 /* NUL */;
-
-	return 0;
-}
-
-static int
-fdata_writef(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char const *format, ...)
-{
-	va_list ap;
-
-	va_start(ap, format);
-	size_t rem = UINT16_MAX - *fdata_size;
-	int n = vsnprintf(fdata + *fdata_size, rem, format, ap);
-	va_end(ap);
-
-	if (rem <= (size_t)n)
-		return -1;
-	if (!n)
-		return 0;
-
-	tmpf->metadata[m] = *fdata_size;
-	*fdata_size += n + 1 /* NUL */;
-
-	return 0;
-}
-
-static int
-fdata_write_basic(MetadataEvent const *e, File *tmpf, char *fdata, size_t *fdata_size)
-{
-	char buf[128];
-	int rc;
-	av_get_channel_layout_string(buf, sizeof buf,
-			e->channels,
-			e->channel_layout);
-	rc = fdata_writef(tmpf, fdata, fdata_size, M_codec,
-			"%s-%s-%d",
-			e->codec_name,
-			buf,
-			e->sample_rate / 1000);
-	if (rc < 0)
-		return rc;
-
-	if (e->cover_codec_id) {
-		rc = fdata_writef(tmpf, fdata, fdata_size, M_cover_codec,
-				"%s-%d",
-				avcodec_get_name(e->cover_codec_id),
-				e->cover_width);
-		if (rc < 0)
-			return rc;
+	for (int i = 0; i < 2; ++i) {
+		SeekEvent *e = &in->seek_event[i];
+		free(e->url);
+		if (0 <= e->dirfd)
+			close(e->dirfd);
 	}
 
-	/* Preserve. */
-	if (e->f->metadata[M_comment]) {
-		int rc = fdata_writef(tmpf, fdata, fdata_size, M_comment,
-				"%s", e->f->url + e->f->metadata[M_comment]);
-		if (rc < 0)
-			return rc;
+	for (int i = 0; i < 2; ++i) {
+		MetadataEvent *e = &in->metadata_event[i];
+		av_dict_free(&e->metadata);
 	}
-
-	return 0;
-}
-
-static int
-fdata_write(File *tmpf, char *fdata, size_t *fdata_size, enum Metadata m, char const *value)
-{
-	size_t old_fdata_size = *fdata_size;
-	int any = !!tmpf->metadata[m];
-
-	if (!any) {
-		tmpf->metadata[m] = *fdata_size;
-	} else {
-		switch (m) {
-		case M_track:
-		case M_disc:
-			/* Multiplicity is not supported because fdata was may
-			 * be interrupted with M_*_total part. */
-			return 0;
-
-		default:
-			fdata[*fdata_size - 1] = ';';
-			break;
-		}
-	}
-
-	char pc = '\0';
-	for (;; ++value) {
-		if (UINT16_MAX <= *fdata_size)
-			return -1;
-		if (!*value)
-			break;
-		char c = (unsigned char)*value < ' ' ? ' ' : *value;
-		switch (m) {
-		default:
-			/* Nothing. */
-			break;
-
-		case M_track:
-		case M_disc:
-			if ('/' == c)
-				goto eos;
-			/* FALLTHROUGH */
-		case M_track_total:
-		case M_disc_total:
-		case M_date:
-		case M_bpm:
-			/* Trim leading zeros. */
-			if (!pc && '0' == c)
-				continue;
-		}
-		if ((!pc || ' ' == pc) && ' ' == c)
-			continue;
-		fdata[(*fdata_size)++] = c;
-		pc = c;
-	}
-eos:
-	*fdata_size -= ' ' == pc;
-	if (old_fdata_size == *fdata_size) {
-	rollback:
-		if (!any)
-			tmpf->metadata[m] = 0;
-		else
-			fdata[old_fdata_size] = '\0';
-		return 0;
-	}
-	fdata[(*fdata_size)++] = '\0';
-
-	if (M_date == m &&
-	    *fdata_size - old_fdata_size == 8 + 1 /* NUL */)
-	{
-		if (UINT16_MAX <= *fdata_size + 2)
-			return -1;
-
-		/*-    543210
-		 * 11112233Z
-		 * 1111-22-33Z
-		 *          ^*/
-		memmove(&fdata[*fdata_size - 1], &fdata[*fdata_size - 3], 3);
-		memmove(&fdata[*fdata_size - 4], &fdata[*fdata_size - 5], 2);
-		fdata[*fdata_size - 2] = '-';
-		fdata[*fdata_size - 5] = '-';
-		*fdata_size += 2;
-	}
-
-	/* Use most precise date. */
-	if (M_date == m && any) {
-		if (old_fdata_size - tmpf->metadata[m] < *fdata_size - old_fdata_size) {
-			memmove(&fdata[tmpf->metadata[m]],
-					&fdata[old_fdata_size],
-					*fdata_size - old_fdata_size);
-			*fdata_size = old_fdata_size;
-		} else {
-			goto rollback;
-		}
-	}
-
-	if (*value) {
-		assert(M_track == m || M_disc == m);
-		assert('/' == *value);
-		enum Metadata totalm = M_disc == m
-			? M_disc_total
-			: M_track_total;
-		return fdata_write(tmpf, fdata, fdata_size, totalm, value + 1);
-	}
-
-	return 0;
 }
 
 static int
@@ -1529,21 +1562,15 @@ read_stream_metadata(MetadataEvent const *e)
 {
 	AVDictionary const *m = e->metadata;
 	File *f = e->f;
-	Playlist *playlist = playlists[f->playlist_index];
-	File tmpf;
-	char fdata[UINT16_MAX];
 
-	size_t url_size = strlen(f->url) + 1 /* NUL */;
-	size_t fdata_size = url_size;
-
-	for (enum Metadata i = 0; i < M_NB; ++i)
-		tmpf.metadata[i] = 0;
+	FileData fdata;
+	fdata_reset_with_url(&fdata, f->url);
 
 	AVDictionaryEntry const *t;
 	AVDictionaryEntry const *t2;
 
 	/* Should not fail since it has been already stored. */
-	xassert(0 <= fdata_write_basic(e, &tmpf, fdata, &fdata_size));
+	xassert(0 <= fdata_write_basic(&fdata, e));
 
 	t = av_dict_get(m, "icy-name", NULL, 0);
 	if (!t || !*t->value)
@@ -1551,7 +1578,7 @@ read_stream_metadata(MetadataEvent const *e)
 
 	t2 = av_dict_get(m, "icy-description", NULL, 0);
 
-	(void)fdata_writef(&tmpf, fdata, &fdata_size,
+	(void)fdata_writef(&fdata,
 			M_artist, "%s%s%s",
 			t && *t->value ? t->value : f->url,
 			t2 && *t2->value ? " - " : "",
@@ -1559,29 +1586,18 @@ read_stream_metadata(MetadataEvent const *e)
 
 	t = av_dict_get(m, "StreamTitle", NULL, 0);
 	if (t)
-		(void)fdata_writef(&tmpf, fdata, &fdata_size,
+		(void)fdata_writef(&fdata,
 				M_title, "%s", *t->value ? t->value : "ID");
 
 	t = av_dict_get(m, "icy-genre", NULL, 0);
 	if (t && *t->value)
-		(void)fdata_writef(&tmpf, fdata, &fdata_size,
+		(void)fdata_writef(&fdata,
 				M_genre, "%s", t->value);
 
-	void *p = malloc(fdata_size);
-	if (!p) {
+	if (fdata_save(&fdata, f) < 0) {
 		notify_strerror_oom();
 		return -1;
 	}
-
-	playlist->modified = 1;
-
-	memcpy(p, f->url, url_size);
-	memcpy(p + url_size, fdata + url_size, fdata_size - url_size);
-
-	free(f->url);
-	f->url = p;
-
-	memcpy(f->metadata, tmpf.metadata, sizeof tmpf.metadata);
 
 	return 1;
 }
@@ -1620,20 +1636,12 @@ read_metadata(MetadataEvent const *e)
 
 	AVDictionary const *m = e->metadata;
 	File *f = e->f;
-	Playlist *playlist = playlists[f->playlist_index];
 
-	File tmpf;
-	char fdata[UINT16_MAX];
-
-	/* Begin file data with its URL. */
-	size_t url_size = strlen(f->url) + 1 /* NUL */;
-	size_t fdata_size = url_size;
-
-	for (enum Metadata i = 0; i < M_NB; ++i)
-		tmpf.metadata[i] = 0;
+	FileData fdata;
+	fdata_reset_with_url(&fdata, f->url);
 
 	if (AV_NOPTS_VALUE != e->duration) {
-		int rc = fdata_writef(&tmpf, fdata, &fdata_size, M_length,
+		int rc = fdata_writef(&fdata, M_length,
 				"%"PRId64,
 				av_rescale(e->duration, 1, AV_TIME_BASE));
 		if (rc < 0)
@@ -1641,7 +1649,7 @@ read_metadata(MetadataEvent const *e)
 	}
 
 	if (e->mtime &&
-	    fdata_write_date(&tmpf, fdata, &fdata_size, M_mtime, e->mtime) < 0)
+	    fdata_write_date(&fdata, M_mtime, e->mtime) < 0)
 		goto fail_too_long;
 
 	for (MetadataMapEntry const *e = METADATA_MAP;
@@ -1653,41 +1661,20 @@ read_metadata(MetadataEvent const *e)
 		{
 			for (AVDictionaryEntry const *t = NULL;
 			     (t = av_dict_get(m, key, t, 0));)
-				if (fdata_write(&tmpf, fdata, &fdata_size, e->m, t->value) < 0)
+				if (fdata_write(&fdata, e->m, t->value) < 0)
 					goto fail_too_long;
 
-			if (tmpf.metadata[e->m])
+			if (fdata.f.metadata[e->m])
 				break;
 		}
 
-	if (fdata_write_basic(e, &tmpf, fdata, &fdata_size) < 0)
+	if (fdata_write_basic(&fdata, e) < 0)
 		goto fail_too_long;
 
-	if (!playlist->modified) {
-		for (enum Metadata i = 0; i < M_NB; ++i)
-			if (!!tmpf.metadata[i] != !!f->metadata[i] ||
-			    (tmpf.metadata[i] &&
-			     strcmp(fdata + tmpf.metadata[i], f->url + f->metadata[i])))
-				goto changed;
-		return 0;
-	changed:
-	}
-
-	void *p = malloc(fdata_size);
-	if (!p) {
+	if (fdata_save(&fdata, f) < 0) {
 		notify_strerror_oom();
 		return -1;
 	}
-
-	playlist->modified = 1;
-
-	memcpy(p, f->url, url_size);
-	memcpy(p + url_size, fdata + url_size, fdata_size - url_size);
-
-	free(f->url);
-	f->url = p;
-
-	memcpy(f->metadata, tmpf.metadata, sizeof tmpf.metadata);
 
 	return 1;
 
@@ -1697,7 +1684,7 @@ fail_too_long:
 }
 
 static void
-write_cover(Input const *in)
+input_write_cover(Input const *in)
 {
 	char tmp[PATH_MAX];
 	if (ssprintf(tmp, "%s~", cover_path) < 0)
@@ -1781,7 +1768,7 @@ update_metadata(Input *in)
 }
 
 static void
-open_input(Input *in, SeekEvent *e)
+input_open(Input *in, SeekEvent *e)
 {
 	memset(&in->s, 0, sizeof in->s);
 
@@ -2168,7 +2155,7 @@ fail:
 }
 
 static char const *
-get_metadata(File const *f, enum MetadataX m, char buf[FILE_METADATA_BUFSZ])
+file_get_metadata(File const *f, enum MetadataX m, char buf[FILE_METADATA_BUFSZ])
 {
 	if (m < (enum MetadataX)M_NB)
 		return f->metadata[m] ? f->url + f->metadata[m] : NULL;
@@ -2191,7 +2178,7 @@ get_metadata(File const *f, enum MetadataX m, char buf[FILE_METADATA_BUFSZ])
 	}
 
 	case MX_playlist:
-		return playlists[f->playlist_index]->name;
+		return file_get_playlist(f)->name;
 
 	default:
 		abort();
@@ -2223,7 +2210,7 @@ static int
 expr_eval_kv_key(Expr const *expr, enum MetadataX m, ExprEvalContext const *ctx)
 {
 	char mbuf[FILE_METADATA_BUFSZ];
-	char const *value = get_metadata(ctx->f, m, mbuf);
+	char const *value = file_get_metadata(ctx->f, m, mbuf);
 
 	/* Fallback to the URL if metadata is missing for this
 	 * file. This way user can avoid nasty queries in a new
@@ -2332,7 +2319,7 @@ expr_free(Expr *expr)
 	free(expr);
 }
 
-static Expr *
+static inline Expr *
 expr_new(enum ExprType type)
 {
 #define EXPR_sizeof(u) (offsetof(Expr, u) + sizeof(((Expr *)0)->u))
@@ -2408,32 +2395,32 @@ expr_parse_kv(ExprParserContext *parser)
 	char const *p = parser->ptr;
 
 	char buf[1 << 12];
-	size_t buf_size = 0;
+	size_t bufsz = 0;
 	char st = '"' == *p || '\'' == *p ? *p++ : '\0';
 
 	for (; *p && (st ? st != *p : ' ' != *p && '|' != *p && ')' != *p); ++p) {
 		unsigned magic_sp = 0;
 		if (' ' == *p) {
 			unsigned escaped = 0;
-			for (size_t i = buf_size; 0 < i && '\\' == buf[--i];)
+			for (size_t i = bufsz; 0 < i && '\\' == buf[--i];)
 				escaped ^= 1;
 			magic_sp = !escaped;
 		}
 
 		if (magic_sp) {
-			if (sizeof buf - 1 /* NUL */ - 6 < buf_size)
+			if (sizeof buf - 1 /* NUL */ - 6 < bufsz)
 				goto fail_too_long;
-			memcpy(buf + buf_size, "[._ -]", 6);
-			buf_size += 6;
+			memcpy(buf + bufsz, "[._ -]", 6);
+			bufsz += 6;
 		} else {
-			if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
+			if (sizeof buf - 1 /* NUL */ - 1 < bufsz)
 				goto fail_too_long;
-			buf[buf_size++] = *p;
+			buf[bufsz++] = *p;
 		}
 	}
 
 	uint32_t re_flags = PCRE2_UTF | PCRE2_MATCH_INVALID_UTF;
-	if (!buf_size) {
+	if (!bufsz) {
 		re_flags |= PCRE2_LITERAL;
 
 		File const *cur = parser->cur;
@@ -2447,26 +2434,26 @@ expr_parse_kv(ExprParserContext *parser)
 			mxs ^= UINT64_C(1) << m;
 
 			char mbuf[FILE_METADATA_BUFSZ];
-			char const *value = get_metadata(cur, m, mbuf);
+			char const *value = file_get_metadata(cur, m, mbuf);
 			if (!value)
 				continue;
 
 			while (*value && ';' != *value) {
-				if (sizeof buf - 1 /* NUL */ - 1 < buf_size)
+				if (sizeof buf - 1 /* NUL */ - 1 < bufsz)
 					goto fail_too_long;
-				buf[buf_size++] = *value++;
+				buf[bufsz++] = *value++;
 			}
 		}
 	} else {
 		re_flags |= PCRE2_DOTALL;
 	}
 
-	buf[buf_size] = '\0';
+	buf[bufsz] = '\0';
 
 
 	if (OP_RE & expr->kv.op) {
 		int rc = pcre2_match(re_ucase,
-				(uint8_t const *)buf, buf_size, 0,
+				(uint8_t const *)buf, bufsz, 0,
 				0, parser->match_data, NULL);
 		if (rc < 0) {
 			assert(PCRE2_ERROR_NOMATCH == rc);
@@ -2476,7 +2463,7 @@ expr_parse_kv(ExprParserContext *parser)
 		size_t error_offset;
 		int error_code;
 		expr->kv.re = pcre2_compile(
-				(uint8_t const *)buf, buf_size, re_flags,
+				(uint8_t const *)buf, bufsz, re_flags,
 				&error_code, &error_offset, NULL);
 		if (!expr->kv.re) {
 			pcre2_get_error_message(error_code,
@@ -2912,55 +2899,6 @@ match_file_worker(TaskWorker *worker, void const *arg)
 	return 0;
 }
 
-static File *
-get_playing(void)
-{
-	return in0.seek_f;
-}
-
-static void sort_files(void);
-
-static int32_t const POS_RND = INT32_MIN;
-
-static File *
-seek_playlist(int32_t pos, int whence)
-{
-	sort_files();
-
-	uint8_t filter_index = cur_filter[live];
-	int32_t n = nfiles[filter_index];
-	if (!n)
-		return NULL;
-
-	if (POS_RND == pos)
-		pos = rnd_nextn(&rnd, n - (SEEK_CUR == whence));
-
-	if (SEEK_SET == whence) {
-		/* Noop. */
-	} else if (SEEK_END == whence) {
-		pos = n - 1 - pos;
-	} else if (SEEK_CUR == whence) {
-		if (live) {
-			File const *playing = get_playing();
-			pos +=
-				playing &&
-				((UINT8_C(1) << filter_index) & playing->filter_mask)
-					? playing->index[live]
-					: 0;
-		} else {
-			pos += sel;
-		}
-	} else {
-		abort();
-	}
-
-	pos %= n;
-	if (pos < 0)
-		pos += n;
-
-	return files[pos];
-}
-
 static int
 file_cmp(void const *px, void const *py)
 {
@@ -2987,8 +2925,8 @@ file_cmp(void const *px, void const *py)
 
 		char mbufx[FILE_METADATA_BUFSZ];
 		char mbufy[FILE_METADATA_BUFSZ];
-		char const *vx = get_metadata(x, m, mbufx);
-		char const *vy = get_metadata(y, m, mbufy);
+		char const *vx = file_get_metadata(x, m, mbufx);
+		char const *vy = file_get_metadata(y, m, mbufy);
 
 		if (!vx || !vy) {
 			cmp = !vy - !vx;
@@ -3065,40 +3003,8 @@ file_cmp(void const *px, void const *py)
 	return 0;
 }
 
-static int
-file_ordered(File const *f, int l)
-{
-	/* Indices are good. */
-	if (order_changed[l])
-		return 0;
-
-	int32_t n = cur_filter[l];
-	return
-		(!f->index[l] || file_cmp(&files[f->index[l] - 1], &f) <= 0) &&
-		(nfiles[n] == f->index[l] + 1 || file_cmp(&f, &files[f->index[l] + 1]) <= 0);
-}
-
 static void
-load_saved_order(void)
-{
-	/* Indices are good. */
-	if (order_changed[live])
-		return;
-
-	/* Initialize unused indices. */
-	for (int32_t i = nfiles[cur_filter[!live]];
-	     i < nfiles[FILTER_ALL]; ++i)
-		files[i]->index[!live] = i;
-
-	/* Restore order using saved indices. */
-	int32_t n = nfiles[cur_filter[live]];
-	for (int32_t i = 0; i < n; ++i)
-		for (int32_t to; i != (to = files[i]->index[live]);)
-			FFSWAP(File *, files[i], files[to]);
-}
-
-static void
-sort_files(void)
+files_do_filtersort(void)
 {
 	if (!order_changed[live])
 		return;
@@ -3143,13 +3049,134 @@ sort_files(void)
 	notify_event(EVENT_FILE_CHANGED);
 }
 
+static File *
+player_get_file(void)
+{
+	return in0.seek_f;
+}
+
+static int32_t const POS_RND = INT32_MIN;
+
+static File *
+files_seek(int32_t pos, int whence)
+{
+	files_do_filtersort();
+
+	uint8_t filter_index = cur_filter[live];
+	int32_t n = nfiles[filter_index];
+	if (!n)
+		return NULL;
+
+	if (POS_RND == pos)
+		pos = rnd_nextn(&rnd, n - (SEEK_CUR == whence));
+
+	if (SEEK_SET == whence) {
+		/* Noop. */
+	} else if (SEEK_END == whence) {
+		pos = n - 1 - pos;
+	} else if (SEEK_CUR == whence) {
+		if (live) {
+			File const *playing = player_get_file();
+			pos +=
+				playing &&
+				((UINT8_C(1) << filter_index) & playing->filter_mask)
+					? playing->index[live]
+					: 0;
+		} else {
+			pos += sel;
+		}
+	} else {
+		abort();
+	}
+
+	pos %= n;
+	if (pos < 0)
+		pos += n;
+
+	return files[pos];
+}
+
+static void
+file_plumb(File const *f, uint8_t filter_index, FILE *stream)
+{
+	if (!(f->filter_mask & (UINT8_C(1) << filter_index)))
+		return;
+
+	Playlist *playlist = file_get_playlist(f);
+	if (F_FILE == f->type &&
+	    '/' != *f->url)
+	{
+		fputs(playlist->dirname, stream);
+		fputc('/', stream);
+	}
+	fputs(f->url, stream);
+
+	for (enum Metadata i = 0; i < M_NB; ++i) {
+		fputc('\t', stream);
+		if (f->metadata[i])
+			fputs(f->url + f->metadata[i], stream);
+	}
+
+	fputc('\n', stream);
+}
+
+static void
+files_plumb(FILE *stream)
+{
+	(void)files_seek(0, SEEK_CUR);
+
+	fputs("path", stream);
+	for (enum Metadata i = 0; i < M_NB; ++i) {
+		fputc('\t', stream);
+		fputs(METADATA_NAMES[i], stream);
+	}
+	fputc('\n', stream);
+
+	int32_t filter_index = cur_filter[live];
+	int32_t n = nfiles[filter_index];
+	for (int32_t i = 0; i < n; ++i)
+		file_plumb(files[i], filter_index, stream);
+}
+
+static int
+file_is_ordered(File const *f, int l)
+{
+	/* Indices are good. */
+	if (order_changed[l])
+		return 0;
+
+	int32_t n = cur_filter[l];
+	return
+		(!f->index[l] || file_cmp(&files[f->index[l] - 1], &f) <= 0) &&
+		(nfiles[n] == f->index[l] + 1 || file_cmp(&f, &files[f->index[l] + 1]) <= 0);
+}
+
+static void
+load_saved_order(void)
+{
+	/* Indices are good. */
+	if (order_changed[live])
+		return;
+
+	/* Initialize unused indices. */
+	for (int32_t i = nfiles[cur_filter[!live]];
+	     i < nfiles[FILTER_ALL]; ++i)
+		files[i]->index[!live] = i;
+
+	/* Restore order using saved indices. */
+	int32_t n = nfiles[cur_filter[live]];
+	for (int32_t i = 0; i < n; ++i)
+		for (int32_t to; i != (to = files[i]->index[live]);)
+			FFSWAP(File *, files[i], files[to]);
+}
+
 static Expr *
 parse_filter_spec(ExprParserContext *parser, char const *s)
 {
 	Expr *query = NULL;
 
 	parser->error_msg = NULL;
-	parser->cur = get_playing();
+	parser->cur = player_get_file();
 	parser->ptr = parser->src = s;
 	parser->match_data = re_match_data;
 
@@ -3182,7 +3209,106 @@ fail:
 	return NULL;
 }
 
-static void select_file(File *f);
+static void
+player_wait(int *cond)
+{
+	xassert(!pthread_mutex_lock(&buffer_lock));
+	while (!*cond)
+		xassert(!pthread_cond_wait(&buffer_cond, &buffer_lock));
+	*cond = 0;
+	xassert(!pthread_mutex_unlock(&buffer_lock));
+}
+
+static void
+player_poke(int *cond)
+{
+	xassert(!pthread_mutex_lock(&buffer_lock));
+	*cond = 1;
+	xassert(!pthread_cond_broadcast(&buffer_cond));
+	xassert(!pthread_mutex_unlock(&buffer_lock));
+}
+
+static void
+update_title(void)
+{
+	File const *f = player_get_file();
+
+	/* Note that metadata is free from control characters. */
+	fputs("\033]0;", tty);
+	if (f && f->metadata[M_title]) {
+		fputs(f->url + f->metadata[M_title], tty);
+		if (f->metadata[M_version])
+			fprintf(tty, " (%s)", f->url + f->metadata[M_version]);
+	} else if (f) {
+		fputs(f->url, tty);
+	} else {
+		fputs("muck", tty);
+	}
+	fputc('\a', tty);
+}
+
+static void
+player_seek_file(File const *f, int64_t ts)
+{
+	assert(f);
+
+	SeekEvent *e = &in0.seek_event[
+		birdlock_wr_acquire(&in0.seek_lock)
+	];
+
+	in0.seek_f = (File *)f;
+	e->f = (File *)f;
+	Playlist *playlist = file_get_playlist(f);
+	e->type = f->type;
+	free(e->url);
+	e->url = strdup(f->url);
+	e->track = cur_track;
+	xdup2(playlist->dirfd, &e->dirfd);
+	e->whence = SEEK_SET;
+	e->ts = ts;
+
+	birdlock_wr_release(&in0.seek_lock);
+	player_poke(&source_cond);
+
+	update_title();
+}
+
+static void
+player_seek(int64_t ts, int whence)
+{
+	SeekEvent *e = &in0.seek_event[
+		birdlock_wr_acquire(&in0.seek_lock)
+	];
+
+	int same_file = e->f == in0.seek_f;
+	if (SEEK_CUR == whence && same_file) {
+		e->ts += ts;
+	} else {
+		e->whence = whence;
+		e->ts = ts;
+	}
+	free(e->url);
+	e->url = NULL;
+	e->f = in0.seek_f;
+
+	birdlock_wr_release(&in0.seek_lock);
+	player_poke(&source_cond);
+}
+
+static void
+files_select(File *f)
+{
+	if (!f)
+		return;
+
+	if (live) {
+		cur_track = 0;
+		player_seek_file(f, AV_NOPTS_VALUE);
+	} else {
+		sel = f->index[live];
+	}
+	notify_event(EVENT_FILE_CHANGED);
+}
 
 static void
 handle_filter_change(uint8_t filter_index)
@@ -3195,16 +3321,34 @@ handle_filter_change(uint8_t filter_index)
 
 	int old_live = live;
 	live = 1;
-	File *f = seek_playlist(0, SEEK_CUR);
-	File *cur = get_playing();
+	File *f = files_seek(0, SEEK_CUR);
+	File *cur = player_get_file();
 	if (f && cur && f != cur)
-		select_file(f);
+		files_select(f);
 	live = old_live;
 }
 
 static void
-filter_files(ExprParserContext *parser, char const *s)
+push_history(char **history, size_t nhistory, char *s)
 {
+	char *carry = history[0];
+	history[0] = s;
+	for (size_t i = 1; i < nhistory && carry; ++i) {
+		if (!strcmp(carry, s)) {
+			free(carry);
+			return;
+		}
+
+		FFSWAP(char *, history[i], carry);
+	}
+	free(carry);
+}
+
+static void
+files_set_filter(ExprParserContext *parser, char *s)
+{
+	push_history(search_history, FF_ARRAY_ELEMS(search_history), s);
+
 	Expr *query = parse_filter_spec(parser, s);
 	if (!query)
 		return;
@@ -3236,47 +3380,6 @@ notify_progress(void)
 	notify_duration = duration;
 
 	notify_event(EVENT_STATE_CHANGED);
-}
-
-static void
-do_wakeup(int *cond)
-{
-	xassert(!pthread_mutex_lock(&buffer_lock));
-	*cond = 1;
-	xassert(!pthread_cond_broadcast(&buffer_wakeup));
-	xassert(!pthread_mutex_unlock(&buffer_lock));
-}
-
-static void
-wait_wakeup(int *cond)
-{
-	xassert(!pthread_mutex_lock(&buffer_lock));
-	while (!*cond)
-		xassert(!pthread_cond_wait(&buffer_wakeup, &buffer_lock));
-	*cond = 0;
-	xassert(!pthread_mutex_unlock(&buffer_lock));
-}
-
-static void
-seek_player(int64_t ts, int whence)
-{
-	SeekEvent *e = &in0.seek_event[
-		birdlock_wr_acquire(&in0.seek_lock)
-	];
-
-	int same_file = e->f == in0.seek_f;
-	if (SEEK_CUR == whence && same_file) {
-		e->ts += ts;
-	} else {
-		e->whence = whence;
-		e->ts = ts;
-	}
-	free(e->url);
-	e->url = NULL;
-	e->f = in0.seek_f;
-
-	birdlock_wr_release(&in0.seek_lock);
-	do_wakeup(&wakeup_source);
 }
 
 static int
@@ -3336,8 +3439,6 @@ update_input_info(void)
 		notify_event(EVENT_STATE_CHANGED);
 }
 
-static void do_key(int c);
-
 static void *
 source_worker(void *arg)
 {
@@ -3375,11 +3476,11 @@ source_worker(void *arg)
 		];
 
 		if (e->url) {
-			close_input(&in0);
+			input_close(&in0);
 
 			in0.f = e->f;
-			open_input(&in0, e);
-			write_cover(&in0);
+			input_open(&in0, e);
+			input_write_cover(&in0);
 			update_input_info();
 
 			/* Otherwise would be noise. */
@@ -3468,7 +3569,7 @@ source_worker(void *arg)
 			atomic_store_lax(&buffer_low, S_RUNNING == state
 					? buffer_full_bytes / 2
 					: 0);
-			wait_wakeup(&wakeup_source);
+			player_wait(&source_cond);
 			continue;
 		}
 
@@ -3544,7 +3645,7 @@ source_worker(void *arg)
 				atomic_fetch_add_explicit(&buffer_tail, 1, memory_order_release);
 			if (unlikely(was_empty)) {
 			wakeup_sink:
-				do_wakeup(&wakeup_sink);
+				player_poke(&sink_cond);
 			}
 
 			notify_progress();
@@ -3604,7 +3705,7 @@ sink_worker(void *arg)
 
 		if (0) {
 		wait:
-			wait_wakeup(&wakeup_sink);
+			player_wait(&sink_cond);
 			continue;
 		}
 
@@ -3621,7 +3722,7 @@ sink_worker(void *arg)
 		assert(0 <= rem_bytes);
 		if (rem_bytes <= atomic_load_lax(&buffer_low)) {
 			atomic_store_lax(&buffer_low, INT64_MIN);
-			do_wakeup(&wakeup_source);
+			player_poke(&source_cond);
 		}
 
 		int graph_changed = 0;
@@ -3723,37 +3824,43 @@ file_playlist_order_cmp(void const *px, void const *py)
 }
 
 static void
-save_playlists(void)
+playlists_save(void)
 {
 	qsort(files, nfiles[FILTER_ALL], sizeof *files, file_playlist_order_cmp);
 
-	for (int16_t i = 0; i < nplaylists; ++i) {
-		Playlist *playlist = playlists[i];
-		save_playlist(playlist);
-	}
+	for (int16_t i = 0; i < nplaylists; ++i)
+		playlist_save(playlists[i]);
 }
 
-static void
-bye(void)
-{
-	fputs(STOP_FOCUS_EVENTS, tty);
-	endwin();
-
-	save_playlists();
-
 #if CONFIG_VALGRIND
+static void
+player_destroy(void)
+{
 	if (threads_inited) {
 		atomic_store_lax(&terminate, 1);
-		do_wakeup(&wakeup_source);
-		do_wakeup(&wakeup_sink);
+		player_poke(&source_cond);
+		player_poke(&sink_cond);
 
 		xassert(!pthread_join(source_thread, NULL));
 		xassert(!pthread_join(sink_thread, NULL));
 	}
 
 	xassert(!pthread_mutex_destroy(&buffer_lock));
-	xassert(!pthread_cond_destroy(&buffer_wakeup));
+	xassert(!pthread_cond_destroy(&buffer_cond));
 
+	input_destroy(&in0);
+	close_output();
+	close_graph();
+
+	uint16_t i = 0;
+	do
+		av_frame_free(&buffer[i]);
+	while ((uint16_t)++i);
+}
+
+static void
+files_destroy(void)
+{
 	for (int32_t i = 0; i < nfiles[FILTER_ALL]; ++i) {
 		File *f = files[i];
 		free(f->url);
@@ -3768,22 +3875,20 @@ bye(void)
 		free(playlist->name);
 		free(playlist);
 	}
+}
+#endif
 
-	for (int i = 0; i < 2; ++i) {
-		SeekEvent *e = &in0.seek_event[i];
-		free(e->url);
-		if (0 <= e->dirfd)
-			close(e->dirfd);
-	}
+static void
+bye(void)
+{
+	fputs(STOP_FOCUS_EVENTS, tty);
+	endwin();
 
-	for (int i = 0; i < 2; ++i) {
-		MetadataEvent *e = &in0.metadata_event[i];
-		av_dict_free(&e->metadata);
-	}
+	playlists_save();
 
-	close_input(&in0);
-	close_output();
-	close_graph();
+#if CONFIG_VALGRIND
+	player_destroy();
+	files_destroy();
 
 	pcre2_code_free(re_ucase);
 	pcre2_match_data_free(re_match_data);
@@ -3792,11 +3897,6 @@ bye(void)
 	if (sort_ucol)
 		ucol_close(sort_ucol);
 #endif
-
-	uint16_t i = 0;
-	do
-		av_frame_free(&buffer[i]);
-	while ((uint16_t)++i);
 
 	for (size_t i = 0; i < FF_ARRAY_ELEMS(search_history); ++i)
 		free(search_history[i]);
@@ -3810,44 +3910,19 @@ bye(void)
 #endif
 }
 
-static void update_title(void);
-
-static void
-play_file(File const *f, int64_t ts)
-{
-	assert(f);
-
-	SeekEvent *e = &in0.seek_event[
-		birdlock_wr_acquire(&in0.seek_lock)
-	];
-
-	in0.seek_f = (File *)f;
-	e->f = (File *)f;
-	Playlist *playlist = playlists[f->playlist_index];
-	e->type = f->type;
-	free(e->url);
-	e->url = strdup(f->url);
-	e->track = cur_track;
-	xdup2(playlist->dirfd, &e->dirfd);
-	e->whence = SEEK_SET;
-	e->ts = ts;
-
-	birdlock_wr_release(&in0.seek_lock);
-	do_wakeup(&wakeup_source);
-
-	update_title();
-}
-
 static FILE *
-open_tmpfile(char tmpname[PATH_MAX])
+tmpf_open(TemporaryFile *tmpf)
 {
 	char const *tmpdir = getenv("TMPDIR");
-	int n = snprintf(tmpname, PATH_MAX, "%s/muckXXXXXX",
-			tmpdir ? tmpdir : "/tmp");
+	if (!tmpdir)
+		tmpdir = "/tmp";
+
+	int n = snprintf(tmpf->pathname, sizeof tmpf->pathname,
+			"%s/muckXXXXXX", tmpdir);
 	if (PATH_MAX <= n)
 		goto fail;
 
-	int fd = mkostemp(tmpname, O_CLOEXEC);
+	int fd = mkostemp(tmpf->pathname, O_CLOEXEC);
 	if (fd < 0)
 		goto fail;
 
@@ -3864,18 +3939,24 @@ fail:
 	return NULL;
 }
 
+static void
+tmpf_close(TemporaryFile *tmpf)
+{
+	unlink(tmpf->pathname);
+}
+
 static char *
-edit_tmpfile(char const *tmpname)
+tmpf_edit(TemporaryFile *tmpf)
 {
 	char *ret = NULL;
 
 	int rc = spawn();
 	if (!rc) {
 		char const *editor = getenv("EDITOR");
-		execlp(editor, editor, "--", tmpname, NULL);
+		execlp(editor, editor, "--", tmpf->pathname, NULL);
 		_exit(EXIT_FAILURE);
 	} else if (0 < rc) {
-		FILE *stream = fopen(tmpname, "re");
+		FILE *stream = fopen(tmpf->pathname, "re");
 		size_t sz = 0;
 		ssize_t len;
 
@@ -3891,7 +3972,7 @@ edit_tmpfile(char const *tmpname)
 		}
 	}
 
-	unlink(tmpname);
+	tmpf_close(tmpf);
 
 	return ret;
 }
@@ -3918,9 +3999,9 @@ cat_history_file(char const *name, FILE *stream)
 	}
 	if (history) {
 		char buf[BUFSIZ];
-		size_t buf_size;
-		while (0 < (buf_size = fread(buf, 1, sizeof buf, history)))
-			fwrite(buf, 1, buf_size, stream);
+		size_t sz;
+		while (0 < (sz = fread(buf, 1, sizeof buf, history)))
+			fwrite(buf, 1, sz, stream);
 		fclose(history);
 	} else {
 		fprintf(stream, "# %s.\n", strerror(errno));
@@ -3934,7 +4015,7 @@ print_syntax_help(File const *cur, FILE *stream)
 	fputs("# Keys:\n", stream);
 	for (enum MetadataX i = 0; i < MX_NB; ++i) {
 		char mbuf[FILE_METADATA_BUFSZ];
-		char const *value = cur ? get_metadata(cur, i, mbuf) : NULL;
+		char const *value = cur ? file_get_metadata(cur, i, mbuf) : NULL;
 		fprintf(stream, "# %c%c=%-*s%s\n",
 				METADATA_IN_URL & (UINT64_C(1) << i) ? '+' : ' ',
 				METADATA_LETTERS[i],
@@ -3945,13 +4026,13 @@ print_syntax_help(File const *cur, FILE *stream)
 }
 
 static void
-open_visual_search(void)
+files_set_filter_visual(void)
 {
 	ExprParserContext parser = { 0 };
 
 reopen:
-	char tmpname[PATH_MAX];
-	FILE *stream = open_tmpfile(tmpname);
+	TemporaryFile tmpf;
+	FILE *stream = tmpf_open(&tmpf);
 	if (!stream)
 		return;
 
@@ -3972,11 +4053,11 @@ reopen:
 		fputc('\n', stream);
 	fputc('\n', stream);
 
-	File *cur = seek_playlist(0, SEEK_CUR);
+	File *cur = files_seek(0, SEEK_CUR);
 	if (cur) {
 		for (enum MetadataX i = 0; i < MX_NB; ++i) {
 			char mbuf[FILE_METADATA_BUFSZ];
-			char const *value = get_metadata(cur, i, mbuf);
+			char const *value = file_get_metadata(cur, i, mbuf);
 			if (!value || !*value)
 				continue;
 
@@ -3995,40 +4076,35 @@ reopen:
 
 	fclose(stream);
 
-	char *line = edit_tmpfile(tmpname);
+	char *line = tmpf_edit(&tmpf);
 	if (!line)
 		return;
 
-	char *carry = search_history[0];
-	search_history[0] = NULL;
-	for (size_t i = 1; i < FF_ARRAY_ELEMS(search_history) && carry; ++i) {
-		if (!strcmp(carry, line)) {
-			search_history[0] = carry;
-			carry = NULL;
-			break;
-		}
-
-		char *tmp = search_history[i];
-		search_history[i] = carry;
-		carry = tmp;
-	}
-	free(carry);
-
-	if (!search_history[0])
-		search_history[0] = line;
-	else
-		free(line);
-
-	filter_files(&parser, search_history[0]);
+	files_set_filter(&parser, line);
 	if (parser.error_msg)
 		goto reopen;
 }
 
 static void
-open_visual_sort(void)
+files_set_order(char *spec)
 {
-	char tmpname[PATH_MAX];
-	FILE *stream = open_tmpfile(tmpname);
+	if (!strcmp(spec, sort_spec[live])) {
+		free(spec);
+		return;
+	}
+
+	if (DEFAULT_SORT_SPEC != sort_spec[live])
+		free(sort_spec[live]);
+	sort_spec[live] = spec;
+
+	order_changed[live] = 1;
+}
+
+static void
+files_set_order_visual(void)
+{
+	TemporaryFile tmpf;
+	FILE *stream = tmpf_open(&tmpf);
 	if (!stream)
 		return;
 
@@ -4039,56 +4115,37 @@ open_visual_sort(void)
 
 	cat_history_file("sort-history", stream);
 
-	File *cur = seek_playlist(0, SEEK_CUR);
+	File *cur = files_seek(0, SEEK_CUR);
 	print_syntax_help(cur, stream);
 
 	fclose(stream);
 
-	char *line = edit_tmpfile(tmpname);
+	char *line = tmpf_edit(&tmpf);
 	if (!line)
 		return;
 
-	if (DEFAULT_SORT_SPEC != sort_spec[live])
-		free(sort_spec[live]);
-	sort_spec[live] = line;
-
-	order_changed[live] = 1;
+	files_set_order(line);
 }
 
 static void
-pause_player(int pause)
+player_pause(int pause)
 {
 	atomic_store_lax(&paused, pause);
 	if (!pause) {
-		do_wakeup(&wakeup_source);
-		do_wakeup(&wakeup_sink);
+		player_poke(&source_cond);
+		player_poke(&sink_cond);
 	}
 	notify_event(EVENT_STATE_CHANGED);
 }
 
 static struct timespec
-get_file_mtim(File const *f)
+file_get_mtim(File const *f)
 {
 	struct stat st;
-	Playlist *parent = playlists[f->playlist_index];
+	Playlist *parent = file_get_playlist(f);
 	return fstatat(parent->dirfd, f->url, &st, 0)
 		? st.st_mtim
 		: (struct timespec){ 0 };
-}
-
-static void
-select_file(File *f)
-{
-	if (!f)
-		return;
-
-	if (live) {
-		cur_track = 0;
-		play_file(f, AV_NOPTS_VALUE);
-	} else {
-		sel = f->index[live];
-	}
-	notify_event(EVENT_FILE_CHANGED);
 }
 
 static void
@@ -4112,14 +4169,14 @@ get_number(int32_t def)
 static void
 spawn_script(int c)
 {
-	File const *f = seek_playlist(0, SEEK_CUR);
+	File const *f = files_seek(0, SEEK_CUR);
 	if (!f)
 		return;
 
-	struct timespec mtim_before = get_file_mtim(f);
+	struct timespec mtim_before = file_get_mtim(f);
 
 	if (!spawn()) {
-		Playlist *playlist = playlists[f->playlist_index];
+		Playlist *playlist = file_get_playlist(f);
 		if (fchdir(playlist->dirfd) < 0) {
 			print_error("Cannot change working directory");
 			_exit(EXIT_FAILURE);
@@ -4134,7 +4191,7 @@ spawn_script(int c)
 			for (enum MetadataX m = 0; m < MX_NB; ++m) {
 				memcpy(name + 5, METADATA_NAMES[m], sizeof *METADATA_NAMES);
 				char mbuf[FILE_METADATA_BUFSZ];
-				char const *value = get_metadata(f, m, mbuf);
+				char const *value = file_get_metadata(f, m, mbuf);
 				if (value)
 					setenv(name, value, 0);
 			}
@@ -4148,21 +4205,21 @@ spawn_script(int c)
 		_exit(EXIT_FAILURE);
 	}
 
-	struct timespec mtim_after = get_file_mtim(f);
+	struct timespec mtim_after = file_get_mtim(f);
 
 	if (memcmp(&mtim_before, &mtim_after, sizeof mtim_before))
-		play_file(f, atomic_load_lax(&cur_pts));
+		player_seek_file(f, atomic_load_lax(&cur_pts));
 }
 
 static void
-switch_live(int new_live)
+files_set_live(int new_live)
 {
 	if (new_live == live)
 		return;
 	live = new_live;
 
 	if (!live) {
-		File const *cur = get_playing();
+		File const *cur = player_get_file();
 		sel = cur ? cur->index[1] : 0;
 	}
 
@@ -4182,7 +4239,7 @@ switch_live(int new_live)
 }
 
 static void
-do_key(int c)
+feed_key(int c)
 {
 	if ('0' <= c && c <= '9') {
 		cur_number[live] = 10 * get_number(0) + (c - '0');
@@ -4191,8 +4248,8 @@ do_key(int c)
 		return;
 	}
 
-	if (*info_msg[info_rd]) {
-		*info_msg[info_rd] = '\0';
+	if (*user_msg[user_msg_rd]) {
+		*user_msg[user_msg_rd] = '\0';
 		notify_event(EVENT_STATE_CHANGED);
 	}
 
@@ -4233,11 +4290,11 @@ do_key(int c)
 
 	case 'M': /* Metadata. */
 		atomic_store_lax(&dump_in0, 1);
-		do_wakeup(&wakeup_source);
+		player_poke(&source_cond);
 		break;
 
 	case 'v':
-		switch_live(live ^ 1);
+		files_set_live(live ^ 1);
 		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 		break;
 
@@ -4247,43 +4304,37 @@ do_key(int c)
 		if (n) {
 			cur_track += 1;
 			cur_track %= n;
-			File *cur = get_playing();
+			File *cur = player_get_file();
 			if (cur)
-				play_file(cur, atomic_load_lax(&cur_pts));
+				player_seek_file(cur, atomic_load_lax(&cur_pts));
 		}
 	}
 		break;
 
 	case '/': /* Search. */
-		open_visual_search();
+		files_set_filter_visual();
 		break;
 
 	case '|':
 		if (isatty(fileno(stdout))) {
-			char tmpname[PATH_MAX];
-			FILE *stream = open_tmpfile(tmpname);
+			TemporaryFile tmpf;
+			FILE *stream = tmpf_open(&tmpf);
 			if (!stream)
 				break;
 
-			plumb_files(stream);
+			files_plumb(stream);
 			fclose(stream);
 
-			if (!spawn()) {
-				char const *editor = getenv("EDITOR");
-				execlp(editor, editor, "--", tmpname, NULL);
-				_exit(EXIT_FAILURE);
-			}
-
-			unlink(tmpname);
+			free(tmpf_edit(&tmpf));
 		} else {
-			plumb_files(stdout);
+			files_plumb(stdout);
 		}
 		break;
 
 	case 'e': /* Edit. */
 	{
 		if (live) {
-			seek_player(1, SEEK_CUR);
+			player_seek(1, SEEK_CUR);
 			break;
 		}
 
@@ -4299,7 +4350,7 @@ do_key(int c)
 				break;
 		}
 
-		select_file(seek_playlist(POS_RND, SEEK_CUR));
+		files_select(files_seek(POS_RND, SEEK_CUR));
 		break;
 
 	case 'n': /* Next. */
@@ -4318,7 +4369,7 @@ do_key(int c)
 		if ('g' == old_seek_cmd)
 			break;
 
-		select_file(seek_playlist(cur_number[live] * dir, SEEK_CUR));
+		files_select(files_seek(cur_number[live] * dir, SEEK_CUR));
 	}
 		break;
 
@@ -4334,9 +4385,9 @@ do_key(int c)
 			uint64_t ts =
 				cur_number[live] / 100 * 60 /* min */ +
 				cur_number[live] % 100 /* sec */;
-			seek_player(ts, SEEK_SET);
+			player_seek(ts, SEEK_SET);
 		} else {
-			select_file(seek_playlist(0, SEEK_SET));
+			files_select(files_seek(0, SEEK_SET));
 		}
 	}
 		break;
@@ -4345,9 +4396,9 @@ do_key(int c)
 	case KEY_END:
 		if (live) {
 			int32_t n = get_number(100 * 3 / 8);
-			seek_player(atomic_load_lax(&cur_duration) * n / 100, SEEK_SET);
+			player_seek(atomic_load_lax(&cur_duration) * n / 100, SEEK_SET);
 		} else {
-			select_file(seek_playlist(0, SEEK_END));
+			files_select(files_seek(0, SEEK_END));
 		}
 		break;
 
@@ -4366,7 +4417,7 @@ do_key(int c)
 	{
 		int dir = 'h' == c || KEY_LEFT == c ? -1 : 1;
 		int32_t n = get_number(5);
-		seek_player(n * dir, SEEK_CUR);
+		player_seek(n * dir, SEEK_CUR);
 	}
 		break;
 
@@ -4376,27 +4427,27 @@ do_key(int c)
 		int dir = 'j' == c ? -1 : 1;
 		if (live) {
 			int32_t n = get_number(FFMAX(atomic_load_lax(&cur_duration) / 16, +5));
-			seek_player(n * dir, SEEK_CUR);
+			player_seek(n * dir, SEEK_CUR);
 		} else {
-			select_file(seek_playlist(get_number(1) * -dir, SEEK_CUR));
+			files_select(files_seek(get_number(1) * -dir, SEEK_CUR));
 		}
 	}
 		break;
 
 	case '.':
 	case '>':
-		pause_player('.' == c);
+		player_pause('.' == c);
 		break;
 
 	case 'c': /* Continue. */
 	case ' ':
-		pause_player(!paused);
+		player_pause(!paused);
 		break;
 
 	case 'a': /* After. */
 	case 'b': /* Before. */
 		if (live && 'b' == c) {
-			seek_player(-2, SEEK_CUR);
+			player_seek(-2, SEEK_CUR);
 			break;
 		}
 
@@ -4412,7 +4463,7 @@ do_key(int c)
 
 	case 'o':
 	case '=':
-		open_visual_sort();
+		files_set_order_visual();
 		break;
 
 	case 'w':
@@ -4433,7 +4484,7 @@ do_key(int c)
 			}
 		}
 
-		select_file(seek_playlist(n, SEEK_SET));
+		files_select(files_seek(n, SEEK_SET));
 	}
 		break;
 
@@ -4458,16 +4509,16 @@ do_key(int c)
 
 	case CONTROL('M'):
 	{
-		File *f = seek_playlist(0, SEEK_CUR);
+		File *f = files_seek(0, SEEK_CUR);
 		if (!f)
 			break;
 
 		int old_live = live;
 		live = 1;
-		select_file(f);
+		files_select(f);
 		live = old_live;
 
-		pause_player(0);
+		player_pause(0);
 	}
 		break;
 
@@ -4495,10 +4546,10 @@ do_key(int c)
 }
 
 static void
-do_keys(char const *s)
+feed_keys(char const *s)
 {
 	while (*s)
-		do_key(*s++);
+		feed_key(*s++);
 }
 
 static void
@@ -4516,25 +4567,6 @@ log_cb(void *ctx, int level, char const *format, va_list ap)
 	if (level <= AV_LOG_ERROR)
 		fputs("\033[m", stderr);
 	funlockfile(stderr);
-}
-
-static void
-update_title(void)
-{
-	File const *f = get_playing();
-
-	/* Note that metadata is free from control characters. */
-	fputs("\033]0;", tty);
-	if (f && f->metadata[M_title]) {
-		fputs(f->url + f->metadata[M_title], tty);
-		if (f->metadata[M_version])
-			fprintf(tty, " (%s)", f->url + f->metadata[M_version]);
-	} else if (f) {
-		fputs(f->url, tty);
-	} else {
-		fputs("muck", tty);
-	}
-	fputc('\a', tty);
 }
 
 static void
@@ -4639,8 +4671,8 @@ draw_files(void)
 	/* Scroll to make current file visible. */
 	int win_lines = LINES - 2;
 
-	File const *playing = get_playing();
-	File const *fsel = seek_playlist(0, SEEK_CUR);
+	File const *playing = player_get_file();
+	File const *fsel = files_seek(0, SEEK_CUR);
 	int32_t fsel_index = fsel ? fsel->index[live] : 0;
 	int32_t old_top = top;
 	int32_t scrolloff = 5;
@@ -4711,7 +4743,7 @@ draw_files(void)
 		if (!cur->metadata[M_title]) {
 			char const *url = cur->url;
 			if (F_URL != cur->type)
-				url = get_metadata(cur, MX_name, NULL);
+				url = file_get_metadata(cur, MX_name, NULL);
 			addstr(url);
 			for (int curx = getcurx(stdscr); curx < COLS; ++curx)
 				addch(' ');
@@ -4719,7 +4751,7 @@ draw_files(void)
 			int x = 0;
 			for (c = defs; c < endc; ++c) {
 				char mbuf[FILE_METADATA_BUFSZ];
-				char const *s = get_metadata(cur, c->mx, mbuf);
+				char const *s = file_get_metadata(cur, c->mx, mbuf);
 				if (!c->mod) {
 					if (x && s) {
 						int curx = getcurx(stdscr);
@@ -4867,11 +4899,11 @@ draw_status_line(void)
 					birdlock_rd_acquire(&sink_info.lock)
 				]);
 
-	info_rd = birdlock_rd_acquire(&info_msg_lock);
-	if (*info_msg[info_rd]) {
+	user_msg_rd = birdlock_rd_acquire(&user_msg_lock);
+	if (*user_msg[user_msg_rd]) {
 		attr_set(A_BOLD, 1, NULL);
 		addch(' ');
-		addstr(info_msg[info_rd]);
+		addstr(user_msg[user_msg_rd]);
 		attr_set(A_NORMAL, 0, NULL);
 		clrtoeol();
 	} else {
@@ -4897,7 +4929,7 @@ handle_sigwinch(int sig)
 	struct winsize w;
 	if (!ioctl(fileno(tty), TIOCGWINSZ, &w)) {
 		resize_term(w.ws_row, w.ws_col);
-		do_key(CONTROL('L'));
+		feed_key(CONTROL('L'));
 	}
 }
 
@@ -4905,7 +4937,7 @@ static void
 handle_sigcont(int sig)
 {
 	(void)sig;
-	do_key(CONTROL('L'));
+	feed_key(CONTROL('L'));
 }
 
 static void
@@ -4943,7 +4975,7 @@ handle_metadata_change(File *f)
 
 	/* Check whether file order changed. */
 	for (int l = 0; l < 2; ++l)
-		if (!file_ordered(f, l))
+		if (!file_is_ordered(f, l))
 			order_changed[l] = 1;
 
 	if (f == in0.seek_f)
@@ -4977,9 +5009,9 @@ handle_signotify(int sig)
 
 	if (EVENT_EOF_REACHED & got_events) {
 		int old_live = live;
-		switch_live(1);
-		do_key(CONTROL('M'));
-		switch_live(old_live);
+		files_set_live(1);
+		feed_key(CONTROL('M'));
+		files_set_live(old_live);
 	}
 
 	if (((EVENT_FILE_CHANGED | EVENT_STATE_CHANGED) & got_events) &&
@@ -4990,7 +5022,8 @@ handle_signotify(int sig)
 			/* File event can only be generated from tty thread, so
 			 * a spurious and otherwise no-op draw_files() can be
 			 * saved. For example it can occur after sort changed
-			 * and sort_files() notifies us about the change. */
+			 * and files_do_filtersort() notifies us about the
+			 * change. */
 			atomic_fetch_and_lax(&pending_events, ~EVENT_FILE_CHANGED);
 		}
 
@@ -5170,10 +5203,15 @@ main(int argc, char **argv)
 			break;
 
 		case 's':
-			if (!(sort_spec[live] = strdup(optarg))) {
+		{
+			char *s = strdup(optarg);
+			if (!s) {
 				print_error("Failed to allocate memory");
 				exit(EXIT_FAILURE);
 			}
+
+			files_set_order(s);
+		}
 			break;
 
 		case 'd':
@@ -5216,7 +5254,7 @@ main(int argc, char **argv)
 
 	/* Open arguments. */
 	{
-		Playlist *master = append_playlist(NULL, "master");
+		Playlist *master = playlist_alloc(NULL, "master");
 		if (!master)
 			exit(EXIT_FAILURE);
 		master->read_only = 1;
@@ -5224,34 +5262,34 @@ main(int argc, char **argv)
 
 		if (argc <= optind) {
 			if (!isatty(STDIN_FILENO)) {
-				File *f = append_file_dupurl(master, F_PLAYLIST, "stdin");
+				File *f = playlist_new_file_dupurl(master, F_PLAYLIST, "stdin");
 				if (!f)
 					exit(EXIT_FAILURE);
-				Playlist *playlist = append_playlist(f, f->url);
+				Playlist *playlist = playlist_alloc(f, f->url);
 				if (!playlist)
 					exit(EXIT_FAILURE);
 				playlist->read_only = 1;
 				playlist->dirfd = dup(master->dirfd);
-				read_playlist_m3u(playlist, dup(STDIN_FILENO));
+				playlist_read_m3u(playlist, dup(STDIN_FILENO));
 			} else {
-				File *f = append_file_dupurl(master, F_PLAYLIST_DIRECTORY, ".");
+				File *f = playlist_new_file_dupurl(master, F_PLAYLIST_DIRECTORY, ".");
 				if (!f)
 					exit(EXIT_FAILURE);
-				read_file(f);
+				file_read(f);
 			}
 		} else for (; optind < argc; ++optind) {
 			char const *url = argv[optind];
 			enum FileType type = probe_url(master, url);
-			File *f = append_file_dupurl(master, type, url);
+			File *f = playlist_new_file_dupurl(master, type, url);
 			if (!f)
 				exit(EXIT_FAILURE);
-			read_file(f);
+			file_read(f);
 		}
 	}
 
 	if (search_history[0]) {
 		ExprParserContext parser;
-		filter_files(&parser, search_history[0]);
+		files_set_filter(&parser, search_history[0]);
 		if (parser.error_msg) {
 			print_error("Failed to parse search query");
 			exit(EXIT_FAILURE);
@@ -5260,7 +5298,7 @@ main(int argc, char **argv)
 
 	if (!startup_cmd)
 		startup_cmd = "s";
-	do_keys(startup_cmd);
+	feed_keys(startup_cmd);
 
 	/* Disconnect stderr unless redirected. */
 	{
@@ -5306,7 +5344,7 @@ main(int argc, char **argv)
 				exit(EXIT_SUCCESS);
 
 			for (int key; ERR != (key = getch());)
-				do_key(key);
+				feed_key(key);
 		}
 	}
 }
