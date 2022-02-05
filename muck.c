@@ -3079,7 +3079,7 @@ file_ordered(File const *f, int l)
 }
 
 static void
-load_sort(void)
+load_saved_order(void)
 {
 	/* Indices are good. */
 	if (order_changed[live])
@@ -4173,7 +4173,12 @@ switch_live(int new_live)
 	number_cmd[0] = '\0';
 	number_cmd[1] = '\0';
 
-	load_sort();
+	if (!live && !order_changed[1])
+		for (int32_t i = 0; i < nfiles[cur_filter[0]]; ++i)
+			files[i]->index[0] = files[i]->index[1];
+	else
+		load_saved_order();
+
 }
 
 static void
