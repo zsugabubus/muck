@@ -4030,7 +4030,7 @@ reopen:
 		return;
 
 	if (parser.error_msg)
-		fprintf(stream, "%*s<ERROR>%s\n"
+		fprintf(stream, "%.*s<ERROR>%s\n"
 				"# Error: %s\n\n",
 				(int)(parser.ptr - parser.src), parser.src,
 				parser.ptr,
