@@ -4248,11 +4248,6 @@ feed_key(int c)
 		return;
 	}
 
-	if (*user_msg[user_msg_rd]) {
-		*user_msg[user_msg_rd] = '\0';
-		notify_event(EVENT_STATE_CHANGED);
-	}
-
 	switch (c) {
 	case CONTROL('D'):
 		number_cmd[live] = '0';
@@ -4503,6 +4498,12 @@ feed_key(int c)
 		break;
 
 	case CONTROL('L'):
+		if (*user_msg[user_msg_rd]) {
+			*user_msg[user_msg_rd] = '\0';
+			notify_event(EVENT_STATE_CHANGED);
+			break;
+		}
+
 		clear();
 		notify_event(EVENT_FILE_CHANGED | EVENT_STATE_CHANGED);
 		break;
