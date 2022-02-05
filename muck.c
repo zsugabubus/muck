@@ -2019,6 +2019,8 @@ configure_graph(AVBufferSrcParameters *pars)
 	}
 
 out:
+	if (rc < 0)
+		close_graph();
 	if (error_msg) {
 		char error_buf[AV_ERROR_MAX_STRING_SIZE];
 		av_make_error_string(error_buf, sizeof error_buf, rc);
@@ -3716,7 +3718,7 @@ sink_worker(void *arg)
 #undef xmacro
 
 		rc = configure_output(frame);
-		if ((!rc && unlikely(graph_changed)) ||
+		if ((!rc && (unlikely(graph_changed) || !graph)) ||
 		    unlikely(0 < rc))
 			rc = configure_graph(pars);
 		if (unlikely(rc < 0)) {
