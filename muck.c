@@ -466,6 +466,10 @@ static char const *ocodec = "pcm";
 static char const *oformat_name = "alsa";
 static char const *ofilename = NULL;
 
+static int ocodec_from_frame;
+static enum AVSampleFormat ocodec_frame_format;
+static AVCodec const *ocodec_avcodec;
+
 static Input in0 = INPUT_INITIALIZER;
 static Stream out;
 static atomic_uchar ALIGNED_ATOMIC dump_in0;
@@ -2053,9 +2057,13 @@ update_output_info(void)
 static int
 configure_output(AVFrame const *frame)
 {
-	AVCodec const *codec = !strcmp(ocodec, "pcm")
-		? avcodec_find_encoder(av_get_pcm_codec(frame->format, -1))
-		: avcodec_find_encoder_by_name(ocodec);
+	if (ocodec_from_frame && ocodec_frame_format != frame->format) {
+		ocodec_frame_format = frame->format;
+		ocodec_avcodec = avcodec_find_encoder(av_get_pcm_codec(frame->format, -1));
+	}
+
+	AVCodec const *codec = ocodec_avcodec;
+
 	if (!codec) {
 		notify_msg("Cannot find encoder");
 		goto fail;
@@ -2063,7 +2071,7 @@ configure_output(AVFrame const *frame)
 
 	/* Configuration not changed. */
 	if (out.codec_ctx &&
-	    codec == out.codec_ctx->codec &&
+	    out.codec_ctx->codec == codec &&
 	    out.codec_ctx->sample_rate == frame->sample_rate &&
 	    out.codec_ctx->channels == frame->channels)
 		return 0;
@@ -5214,6 +5222,10 @@ main(int argc, char **argv)
 		default:
 			exit(EXIT_FAILURE);
 		}
+
+	ocodec_from_frame = !strcmp(ocodec, "pcm");
+	if (!ocodec_from_frame)
+		ocodec_avcodec = avcodec_find_encoder_by_name(ocodec);
 
 	/* Spin up workers. */
 	{
