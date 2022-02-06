@@ -85,6 +85,10 @@ strchrnul(char const *s, char c)
 #define CONTROL(c) ((c) - '@')
 
 enum {
+	MUCK_O_DIRFD = O_CLOEXEC | O_PATH | O_RDONLY | O_DIRECTORY,
+};
+
+enum {
 	KEY_FOCUS_IN = 1001,
 	KEY_FOCUS_OUT = 1002,
 };
@@ -586,19 +590,6 @@ notify_event(enum Event event)
 }
 
 static void
-print_error(char const *msg, ...)
-{
-	va_list ap;
-	va_start(ap, msg);
-	flockfile(stderr);
-	fputs("\033[1;31m", stderr);
-	vfprintf(stderr, msg, ap);
-	fputs("\033[m\n", stderr);
-	funlockfile(stderr);
-	va_end(ap);
-}
-
-static void
 notify_msg(char const *format, ...)
 {
 	char *buf = user_msg[
@@ -682,16 +673,6 @@ probe_compressor(char const *url)
 #undef xmacro
 
 	abort();
-}
-
-static void
-fd2dirname(int fd, char dirbuf[static PATH_MAX])
-{
-	char linkname[50];
-	sprintf(linkname, "/proc/self/fd/%d", fd);
-	ssize_t rc = readlink(linkname, dirbuf, PATH_MAX - 2);
-	if (rc < 0)
-		strcpy(dirbuf, "(error)");
 }
 
 static int
@@ -1167,10 +1148,7 @@ playlist_read_m3u(Playlist *playlist, int fd)
 				Playlist *parent = playlist_get_parent(playlist);
 
 				close(playlist->dirfd);
-				playlist->dirfd = openat(
-						parent->dirfd,
-						col,
-						O_CLOEXEC | O_PATH | O_RDONLY | O_DIRECTORY);
+				playlist->dirfd = openat(parent->dirfd, col, MUCK_O_DIRFD);
 
 				/* NOTE: Only plain directory base URLs are supported. */
 				if (playlist->dirfd < 0) {
@@ -1222,10 +1200,6 @@ playlist_read_m3u(Playlist *playlist, int fd)
 		++lnum;
 	}
 
-	char dirbuf[PATH_MAX];
-	fd2dirname(playlist->dirfd, dirbuf);
-	playlist->dirname = strdup(dirbuf);
-
 out:
 	if (error_msg) {
 		notify_msg("%s:%zu:%zu: %s",
@@ -1241,19 +1215,14 @@ out:
 }
 
 static void
-playlist_read_dir(Playlist *playlist, int fd)
+playlist_read_dir(Playlist *playlist)
 {
-	playlist->dirfd = fd;
-	playlist->dirname = strdup(playlist->f->url);
-	playlist->read_only = 1;
-
 	DIR *dir = fdopendir(dup(playlist->dirfd));
 	if (!dir)
 		return;
 
 	for (struct dirent *dent; (dent = readdir(dir));) {
 		char const *name = dent->d_name;
-		/* Skip files starting with dot. */
 		if ('.' == *name)
 			continue;
 
@@ -1301,9 +1270,37 @@ playlist_pipe_compress(Playlist *playlist, int *playlist_fd, pid_t *pid, int do_
 	*playlist_fd = pipes[do_compress];
 }
 
+static char *
+path_join(char const *base, char const *name)
+{
+	if ('/' == *name)
+		return strdup(name);
+
+	while ('.' == name[0] && '/' == name[1])
+		name += 2;
+
+	for (; '.' == base[0]; base += 2) {
+		if ('/' == base[1])
+			continue;
+
+		if (!base[1])
+			return strdup(name);
+		break;
+	}
+
+	int n = snprintf(NULL, 0, "%s/%s", base, name);
+	char *ret = malloc(n + 1 /* NUL */);
+	if (!ret)
+		return NULL;
+	sprintf(ret, "%s/%s", base, name);
+	return ret;
+}
+
 static void
 playlist_read(Playlist *playlist, int fd)
 {
+	Playlist *parent = playlist_get_parent(playlist);
+
 	switch (playlist->f->type) {
 	case F_PLAYLIST:
 	case F_PLAYLIST_COMPRESSED:
@@ -1311,17 +1308,18 @@ playlist_read(Playlist *playlist, int fd)
 		char *slash = strrchr(playlist->f->url, '/');
 		if (slash)
 			*slash = '\0';
-
 		char const *dirname = slash ? playlist->f->url : ".";
 
-		Playlist *parent = playlist_get_parent(playlist);
-		playlist->dirfd = openat(parent->dirfd, dirname,
-				O_CLOEXEC | O_PATH | O_RDONLY | O_DIRECTORY);
-		if (playlist->dirfd < 0)
-			return;
+		playlist->dirfd = openat(parent->dirfd, dirname, MUCK_O_DIRFD);
+		playlist->dirname = path_join(parent->dirname, dirname);
 
 		if (slash)
 			*slash = '/';
+
+		if (playlist->dirfd < 0) {
+			close(fd);
+			return;
+		}
 
 		pid_t pid = -1;
 		if (F_PLAYLIST_COMPRESSED == playlist->f->type)
@@ -1335,7 +1333,10 @@ playlist_read(Playlist *playlist, int fd)
 		break;
 
 	case F_PLAYLIST_DIRECTORY:
-		playlist_read_dir(playlist, fd);
+		playlist->dirfd = fd;
+		playlist->dirname = path_join(parent->dirname, playlist->f->url);
+		playlist->read_only = 1;
+		playlist_read_dir(playlist);
 		break;
 
 	default:
@@ -2907,7 +2908,7 @@ file_cmp(void const *px, void const *py)
 
 		enum MetadataX m = METADATA_FROM_U8[(uint8_t)*s];
 		if (MX_NB == m) {
-			print_error("invalid sort specifier '%c'", *s);
+			notify_msg("invalid sort specifier '%c'", *s);
 			break;
 		}
 
@@ -3099,8 +3100,17 @@ file_plumb(File const *f, uint8_t filter_index, FILE *stream)
 	if (F_FILE == f->type &&
 	    '/' != *f->url)
 	{
-		fputs(playlist->dirname, stream);
-		fputc('/', stream);
+		char const *dirname = playlist->dirname;
+		if (!dirname) {
+			fputs("(error)", stream);
+		} else if ('.' == dirname[0] &&
+		           (!dirname[1] || '/' == dirname[1]))
+		{
+			/* Nothing. */
+		} else {
+			fputs(dirname, stream);
+			fputc('/', stream);
+		}
 	}
 	fputs(f->url, stream);
 
@@ -3825,6 +3835,54 @@ playlists_save(void)
 		playlist_save(playlists[i]);
 }
 
+static int
+files_open_cmdline(int argc, char *argv[])
+{
+	int rc = 0;
+
+	Playlist *master = playlist_alloc(NULL, "master");
+	if (!master)
+		return -ENOMEM;
+	master->read_only = 1;
+	master->dirname = strdup(".");
+	if (!master->dirname)
+		return -ENOMEM;
+	master->dirfd = open(master->dirname, MUCK_O_DIRFD);
+
+	if (!argc) {
+		if (!isatty(STDIN_FILENO)) {
+			File *f = playlist_new_file_dupurl(master, F_PLAYLIST, "stdin");
+			if (!f)
+				return -ENOMEM;
+			Playlist *playlist = playlist_alloc(f, f->url);
+			if (!playlist)
+				return -ENOMEM;
+			playlist->read_only = 1;
+			playlist->dirname = strdup(".");
+			if (!playlist->dirname)
+				return -ENOMEM;
+			playlist->dirfd = dup(master->dirfd);
+			playlist_read_m3u(playlist, dup(STDIN_FILENO));
+		} else {
+			File *f = playlist_new_file_dupurl(master, F_PLAYLIST_DIRECTORY, ".");
+			if (!f)
+				return -ENOMEM;
+			file_read(f);
+		}
+	} else for (int i = 0; i < argc; ++i) {
+		char const *url = argv[i];
+		enum FileType type = probe_url(master, url);
+		File *f = playlist_new_file_dupurl(master, type, url);
+		if (!f) {
+			rc = -ENOMEM;
+			continue;
+		}
+		file_read(f);
+	}
+
+	return rc;
+}
+
 #if CONFIG_VALGRIND
 static void
 player_destroy(void)
@@ -3872,10 +3930,19 @@ files_destroy(void)
 #endif
 
 static void
-bye(void)
+tui_stop(void)
 {
+	if (!tty)
+		return;
+
 	fputs(STOP_FOCUS_EVENTS, tty);
 	endwin();
+}
+
+static void
+bye(void)
+{
+	tui_stop();
 
 	playlists_save();
 
@@ -4171,7 +4238,7 @@ spawn_script(int c)
 	if (!spawn()) {
 		Playlist *playlist = file_get_playlist(f);
 		if (fchdir(playlist->dirfd) < 0) {
-			print_error("Cannot change working directory");
+			fprintf(stderr, "Cannot change working directory\n");
 			_exit(EXIT_FAILURE);
 		}
 
@@ -4193,7 +4260,7 @@ spawn_script(int c)
 		char exe[PATH_MAX];
 		if (0 <= ssprintf(exe, "%s/%c", config_home, c))
 			execl(exe, exe, f->url, NULL);
-		print_error("No binding for '%c'", c);
+		fprintf(stderr, "No binding for '%c'\n", c);
 
 		_exit(EXIT_FAILURE);
 	}
@@ -4547,20 +4614,64 @@ feed_keys(char const *s)
 }
 
 static void
-log_cb(void *ctx, int level, char const *format, va_list ap)
+tui_redirect_stderr(void)
 {
-	(void)ctx;
+	struct stat st_stdin, st_stderr;
+	if (fstat(STDIN_FILENO, &st_stdin) < 0 ||
+	    fstat(STDERR_FILENO, &st_stderr) < 0 ||
+	    (st_stdin.st_dev == st_stderr.st_dev &&
+	     st_stdin.st_ino == st_stderr.st_ino))
+		freopen("/dev/null", "w+", stderr);
+}
 
-	if (av_log_get_level() < level)
-		return;
+static int
+tui_init(void)
+{
+	if (!(tty = fopen(ctermid(NULL), "w+e")))
+		return -errno;
+	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
+	return 0;
+}
 
-	flockfile(stderr);
-	if (level <= AV_LOG_ERROR)
-		fputs("\033[1;31m", stderr);
-	vfprintf(stderr, format, ap);
-	if (level <= AV_LOG_ERROR)
-		fputs("\033[m", stderr);
-	funlockfile(stderr);
+static void
+tui_run(void)
+{
+	tui_redirect_stderr();
+
+	pthread_setname_np(pthread_self(), "muck/tty");
+	newterm(NULL, stdout, tty);
+	start_color();
+	use_default_colors();
+	init_pair(1, 1, -1);
+	cbreak();
+	noecho();
+	nonl();
+	nodelay(stdscr, TRUE);
+	keypad(stdscr, TRUE);
+	meta(stdscr, TRUE);
+	curs_set(0);
+
+	define_key("\033[I", KEY_FOCUS_IN);
+	define_key("\033[O", KEY_FOCUS_OUT);
+	fputs(SEND_FOCUS_EVENTS, tty);
+
+	struct pollfd pollfd;
+	pollfd.fd = fileno(tty);
+	pollfd.events = POLLIN;
+
+	sigset_t enable_all;
+	xassert(!sigemptyset(&enable_all));
+
+	for (;;) {
+		int rc = ppoll(&pollfd, 1, NULL, &enable_all);
+		if (rc <= 0 && EINTR == errno)
+			continue;
+		if (rc <= 0 || (~POLLIN & pollfd.revents))
+			exit(EXIT_SUCCESS);
+
+		for (int key; ERR != (key = getch());)
+			feed_key(key);
+	}
 }
 
 static void
@@ -5029,17 +5140,154 @@ handle_signotify(int sig)
 	}
 }
 
+static void
+player_libav_log_cb(void *ctx, int level, char const *format, va_list ap)
+{
+	(void)ctx;
+
+	if (av_log_get_level() < level)
+		return;
+
+	vfprintf(stderr, format, ap);
+}
+
+static void
+player_init(void)
+{
+	av_log_set_callback(player_libav_log_cb);
+	av_log_set_level(AV_LOG_ERROR);
+	avdevice_register_all();
+
+	/* Set defaults. */
+	update_input_info();
+	update_output_info();
+}
+
+static int
+player_run(void)
+{
+	ocodec_from_frame = !strcmp(ocodec, "pcm");
+	if (!ocodec_from_frame)
+		ocodec_avcodec = avcodec_find_encoder_by_name(ocodec);
+
+	sigset_t block_all, saved_mask;
+	xassert(!sigfillset(&block_all));
+	xassert(!pthread_sigmask(SIG_SETMASK, &block_all, &saved_mask));
+
+	pthread_attr_t attr;
+	struct sched_param sp;
+
+	if (pthread_attr_init(&attr) ||
+	    pthread_attr_setschedpolicy(&attr, SCHED_FIFO) ||
+	    (sp.sched_priority = sched_get_priority_max(SCHED_FIFO)) < 0 ||
+	    pthread_attr_setschedparam(&attr, &sp) ||
+	    pthread_create(&source_thread, &attr, source_worker, NULL) ||
+	    pthread_create(&sink_thread, &attr, sink_worker, NULL) ||
+	    pthread_attr_destroy(&attr))
+		return -errno;
+
+#if CONFIG_VALGRIND
+	threads_inited = 1;
+#endif
+
+	xassert(!pthread_sigmask(SIG_SETMASK, &saved_mask, NULL));
+	return 0;
+}
+
+static void
+setup_signals(void)
+{
+	sigset_t watched;
+	xassert(!sigemptyset(&watched));
+	xassert(!sigaddset(&watched, SIGCONT));
+	xassert(!sigaddset(&watched, SIGWINCH));
+	xassert(!sigaddset(&watched, SIGINT));
+	xassert(!sigaddset(&watched, SIGHUP));
+	xassert(!sigaddset(&watched, SIGTERM));
+	xassert(!sigaddset(&watched, SIGQUIT));
+	xassert(!sigaddset(&watched, SIGPIPE));
+	xassert(!sigaddset(&watched, SIGRTMIN));
+	xassert(!pthread_sigmask(SIG_BLOCK, &watched, NULL));
+
+	struct sigaction sa;
+	sa.sa_flags = SA_RESTART;
+	xassert(!sigfillset(&sa.sa_mask));
+
+	sa.sa_handler = handle_sigcont;
+	xassert(!sigaction(SIGCONT, &sa, NULL));
+
+	sa.sa_handler = handle_sigexit;
+	xassert(!sigaction(SIGINT, &sa, NULL));
+	xassert(!sigaction(SIGHUP, &sa, NULL));
+	xassert(!sigaction(SIGTERM, &sa, NULL));
+	xassert(!sigaction(SIGQUIT, &sa, NULL));
+
+	sa.sa_handler = SIG_IGN;
+	xassert(!sigaction(SIGPIPE, &sa, NULL));
+
+	sa.sa_handler = handle_sigwinch;
+	xassert(!sigaction(SIGWINCH, &sa, NULL));
+
+	sa.sa_handler = handle_signotify;
+	xassert(!sigaction(SIGRTMIN, &sa, NULL));
+}
+
+static void
+setup_env(void)
+{
+	char const *env;
+
+	if ((env = getenv("MUCK_HOME"))) {
+		snprintf(config_home, sizeof config_home, "%s", env);
+	} else {
+		if ((env = getenv("XDG_CONFIG_HOME"))) {
+			snprintf(config_home, sizeof config_home,
+					"%s/muck", env);
+		} else {
+			env = getenv("HOME");
+			snprintf(config_home, sizeof config_home,
+					"%s/.config/muck", env);
+			if (access(config_home, F_OK))
+				snprintf(config_home, sizeof config_home,
+						"%s/.muck", env);
+		}
+		xassert(!setenv("MUCK_HOME", config_home, 1));
+	}
+
+	if ((env = getenv("MUCK_COVER"))) {
+		snprintf(cover_path, sizeof cover_path, "%s", env);
+	} else {
+		if ((env = getenv("XDG_RUNTIME_DIR"))) {
+			snprintf(cover_path, sizeof cover_path,
+					"%s/muck-cover", env);
+		} else {
+			if (!(env = getenv("TMPDIR")))
+				env = "/tmp";
+			snprintf(cover_path, sizeof cover_path,
+					"%s/muck-%ld-cover", env, (long)getuid());
+		}
+
+		xassert(!setenv("MUCK_COVER", cover_path, 1));
+	}
+}
+
+static void
+ensure(char const *error_msg)
+{
+	if (!error_msg)
+		error_msg = "Out of memory";
+	fputs(error_msg, stderr);
+	fputc('\n', stderr);
+}
+#define ensure(cond, error_msg) do { \
+	if (unlikely(!(cond))) \
+		ensure(error_msg); \
+} while (0)
+
 int
-main(int argc, char **argv)
+main(int argc, char *argv[])
 {
 	setlocale(LC_ALL, "");
-
-	if (!(tty = fopen(ctermid(NULL), "w+e"))) {
-		print_error("Cannot connect to TTY");
-		exit(EXIT_FAILURE);
-	}
-	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
-
 	atexit(bye);
 
 	main_thread = pthread_self();
@@ -5048,17 +5296,14 @@ main(int argc, char **argv)
 		size_t error_offset;
 		int error_code;
 		re_ucase = pcre2_compile(
-			(uint8_t const[]){ "\\p{Lu}" }, 6,
-			PCRE2_UTF | PCRE2_NO_UTF_CHECK,
-			&error_code, &error_offset,
-			NULL);
+				(uint8_t const[]){ "\\p{Lu}" }, 6,
+				PCRE2_UTF | PCRE2_NO_UTF_CHECK,
+				&error_code, &error_offset,
+				NULL);
 
 		re_match_data = pcre2_match_data_create(0, NULL);
-
-		if (!re_ucase || !re_match_data) {
-			print_error("Failed to allocate PCRE2 structures");
-			exit(EXIT_FAILURE);
-		}
+		ensure(re_ucase && re_match_data,
+				"Failed to allocate PCRE2 structures");
 	}
 
 #if WITH_ICU
@@ -5071,101 +5316,21 @@ main(int argc, char **argv)
 				/* Compare base letters case-less. */
 				UCOL_PRIMARY,
 				&parse_error, &error_code);
-		if (!sort_ucol) {
-			print_error("Failed to open collator");
-			exit(EXIT_FAILURE);
-		}
+		ensure(sort_ucol, "Failed to open Unicode collator");
 		assert(U_SUCCESS(error_code));
 	}
 #endif
 
-	/* Setup signals. */
-	{
-		struct sigaction sa;
-		sa.sa_flags = SA_RESTART;
-		/* Block all signals. */
-		xassert(!sigfillset(&sa.sa_mask));
-		xassert(!pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL));
-
-		sa.sa_handler = handle_sigcont;
-		xassert(!sigaction(SIGCONT, &sa, NULL));
-
-		sa.sa_handler = handle_sigwinch;
-		xassert(!sigaction(SIGWINCH, &sa, NULL));
-		handle_sigwinch(SIGWINCH);
-
-		sa.sa_handler = handle_sigexit;
-		xassert(!sigaction(SIGINT, &sa, NULL));
-		xassert(!sigaction(SIGHUP, &sa, NULL));
-		xassert(!sigaction(SIGTERM, &sa, NULL));
-		xassert(!sigaction(SIGQUIT, &sa, NULL));
-
-		sa.sa_handler = SIG_IGN;
-		xassert(!sigaction(SIGPIPE, &sa, NULL));
-
-		sa.sa_handler = handle_signotify;
-		xassert(!sigaction(SIGRTMIN, &sa, NULL));
-	}
-
-	/* Setup FFmpeg. */
-	av_log_set_callback(log_cb);
-	av_log_set_level(AV_LOG_ERROR);
-
-	avdevice_register_all();
-
-	/* Sanitize environment. */
-	{
-		char const *env;
-
-		if ((env = getenv("MUCK_HOME"))) {
-			snprintf(config_home, sizeof config_home, "%s", env);
-		} else {
-			if ((env = getenv("XDG_CONFIG_HOME"))) {
-				snprintf(config_home, sizeof config_home,
-						"%s/muck", env);
-			} else {
-				env = getenv("HOME");
-				snprintf(config_home, sizeof config_home,
-						"%s/.config/muck", env);
-				if (access(config_home, F_OK))
-					snprintf(config_home, sizeof config_home,
-							"%s/.muck", env);
-			}
-			xassert(!setenv("MUCK_HOME", config_home, 1));
-		}
-
-		if ((env = getenv("MUCK_COVER"))) {
-			snprintf(cover_path, sizeof cover_path, "%s", env);
-		} else {
-			if ((env = getenv("XDG_RUNTIME_DIR"))) {
-				snprintf(cover_path, sizeof cover_path,
-						"%s/muck-cover", env);
-			} else {
-				if (!(env = getenv("TMPDIR")))
-					env = "/tmp";
-				snprintf(cover_path, sizeof cover_path,
-						"%s/muck-%ld-cover", env, (long)getuid());
-			}
-
-			xassert(!setenv("MUCK_COVER", cover_path, 1));
-		}
-	}
-
-	xassert(0 <= rnd_init(&rnd));
-
-	/* Set defaults. */
-	update_input_info();
-	update_output_info();
+	ensure(0 <= rnd_init(&rnd), "Could not initalize random");
+	ensure(0 <= tui_init(), "Could not initalize TUI");
+	player_init();
 
 	/* Setup ended, can load files now. */
 	char const *startup_cmd = NULL;
 	for (int c; 0 <= (c = getopt(argc, argv, "q:e:a:c:f:o:m:C:s:dv"));)
 		switch (c) {
 		case 'q':
-			if (!(search_history[0] = strdup(optarg))) {
-				print_error("Failed to allocate memory");
-				exit(EXIT_FAILURE);
-			}
+			ensure(search_history[0] = strdup(optarg), NULL);
 			break;
 
 		case 'e':
@@ -5199,11 +5364,7 @@ main(int argc, char **argv)
 		case 's':
 		{
 			char *s = strdup(optarg);
-			if (!s) {
-				print_error("Failed to allocate memory");
-				exit(EXIT_FAILURE);
-			}
-
+			ensure(s, NULL);
 			files_set_order(s);
 		}
 			break;
@@ -5216,133 +5377,30 @@ main(int argc, char **argv)
 #define xmacro(flag, name) " " FEATURE_HAVE(flag) name
 			puts(MUCK_VERSION);
 			puts("Features:" FEATURES);
-#undef xmacor
-			exit(EXIT_SUCCESS);
+#undef xmacro
+			return EXIT_SUCCESS;
 
 		default:
-			exit(EXIT_FAILURE);
+			return EXIT_FAILURE;
 		}
 
-	ocodec_from_frame = !strcmp(ocodec, "pcm");
-	if (!ocodec_from_frame)
-		ocodec_avcodec = avcodec_find_encoder_by_name(ocodec);
+	setup_env();
+	setup_signals();
 
-	/* Spin up workers. */
-	{
-		pthread_attr_t attr;
-		struct sched_param sp;
+	ensure(0 <= player_run(), "Could not start player");
 
-		if (pthread_attr_init(&attr) ||
-		    pthread_attr_setschedpolicy(&attr, SCHED_FIFO) ||
-		    (sp.sched_priority = sched_get_priority_max(SCHED_FIFO)) < 0 ||
-		    pthread_attr_setschedparam(&attr, &sp) ||
-		    pthread_create(&source_thread, &attr, source_worker, NULL) ||
-		    pthread_create(&sink_thread, &attr, sink_worker, NULL) ||
-
-		    pthread_attr_destroy(&attr))
-		{
-			notify_strerror("Cannot create worker thread");
-			exit(EXIT_FAILURE);
-		}
-
-#if CONFIG_VALGRIND
-		threads_inited = 1;
-#endif
-	}
-
-	/* Open arguments. */
-	{
-		Playlist *master = playlist_alloc(NULL, "master");
-		if (!master)
-			exit(EXIT_FAILURE);
-		master->read_only = 1;
-		master->dirfd = open(".", O_CLOEXEC | O_PATH | O_RDONLY | O_DIRECTORY);
-
-		if (argc <= optind) {
-			if (!isatty(STDIN_FILENO)) {
-				File *f = playlist_new_file_dupurl(master, F_PLAYLIST, "stdin");
-				if (!f)
-					exit(EXIT_FAILURE);
-				Playlist *playlist = playlist_alloc(f, f->url);
-				if (!playlist)
-					exit(EXIT_FAILURE);
-				playlist->read_only = 1;
-				playlist->dirfd = dup(master->dirfd);
-				playlist_read_m3u(playlist, dup(STDIN_FILENO));
-			} else {
-				File *f = playlist_new_file_dupurl(master, F_PLAYLIST_DIRECTORY, ".");
-				if (!f)
-					exit(EXIT_FAILURE);
-				file_read(f);
-			}
-		} else for (; optind < argc; ++optind) {
-			char const *url = argv[optind];
-			enum FileType type = probe_url(master, url);
-			File *f = playlist_new_file_dupurl(master, type, url);
-			if (!f)
-				exit(EXIT_FAILURE);
-			file_read(f);
-		}
-	}
+	ensure(0 <= files_open_cmdline(argc - optind, argv + optind),
+			"Could not populate files from command line");
 
 	if (search_history[0]) {
 		ExprParserContext parser;
 		files_set_filter(&parser, search_history[0]);
-		if (parser.error_msg) {
-			print_error("Failed to parse search query");
-			exit(EXIT_FAILURE);
-		}
+		ensure(parser.error_msg, "Failed to pare search query");
 	}
 
 	if (!startup_cmd)
 		startup_cmd = "s";
 	feed_keys(startup_cmd);
 
-	/* Disconnect stderr unless redirected. */
-	{
-		struct stat st_stdin, st_stderr;
-		if (fstat(STDIN_FILENO, &st_stdin) < 0 ||
-		    fstat(STDERR_FILENO, &st_stderr) < 0 ||
-		    (st_stdin.st_dev == st_stderr.st_dev &&
-		     st_stdin.st_ino == st_stderr.st_ino))
-			freopen("/dev/null", "w+", stderr);
-	}
-
-	/* TUI event loop. */
-	{
-		pthread_setname_np(pthread_self(), "muck/tty");
-		newterm(NULL, stdout, tty);
-		start_color();
-		use_default_colors();
-		init_pair(1, 1, -1);
-		cbreak();
-		noecho();
-		nonl();
-		nodelay(stdscr, TRUE);
-		keypad(stdscr, TRUE);
-		meta(stdscr, TRUE);
-		curs_set(0);
-
-		define_key("\033[I", KEY_FOCUS_IN);
-		define_key("\033[O", KEY_FOCUS_OUT);
-		fputs(SEND_FOCUS_EVENTS, tty);
-
-		struct pollfd pollfd;
-		pollfd.fd = fileno(tty);
-		pollfd.events = POLLIN;
-
-		sigset_t sigmask;
-		xassert(!sigemptyset(&sigmask));
-
-		for (;;) {
-			int rc = ppoll(&pollfd, 1, NULL, &sigmask);
-			if (rc <= 0 && EINTR == errno)
-				continue;
-			if (rc <= 0 || (~POLLIN & pollfd.revents))
-				exit(EXIT_SUCCESS);
-
-			for (int key; ERR != (key = getch());)
-				feed_key(key);
-		}
-	}
+	tui_run();
 }
