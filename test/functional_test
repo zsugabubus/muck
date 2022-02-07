@@ -1,0 +1,836 @@
+#!/bin/sh -xeu
+PATH=$BUILD_ROOT:$PATH
+
+export LC_ALL= TZ=
+
+mkdir -p -- "$WORK_ROOT"
+cd -- "$WORK_ROOT"
+
+diff() {
+	command diff >&2 -BZ - "$@"
+}
+
+audio() {
+	ffmpeg -y \
+		-t 5 \
+		-f lavfi -i "anullsrc" \
+		-f lavfi -i "nullsrc" \
+		-disposition:v attached_pic \
+		-id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" \
+		-shortest \
+		-f "$@" -
+}
+
+playlist() {
+	cat >pl.m3u <<"EOF"
+#EXTM3U
+#PLAYLIST:Hello wörld !
+#EXTINF:0,
+
+#EXTINF:0 date="d2000-01-01" title="first" track="1" artist="b;c;b" comment="z",
+2
+#EXTINF:0 date="b2001-01-01" title="first" track="2" artist="c;b;a",
+1
+F
+#EXTINF:0 date="c2001-01-01" title="\"first\"" track="2" artist="b;c",
+3
+#EXTINF:0 date="a2001-01-01" title="first" track="1" artist="c;b;d",
+4
+#EXTINF:0,
+F
+EOF
+}
+
+playlist
+
+! muck -f xxx <<"EOF"
+#EXTM3U
+#EXTINF:0
+EOF
+
+muck <pl.m3u >stdout -f xxx -e '|q' -q'!~F' -s 'a'
+sed -i '1d' stdout
+diff stdout <<"EOF"
+1	c;b;a											2		first						b2001-01-01				0
+2	b;c;b											1		first						d2000-01-01				0	z
+3	b;c											2		"first"						c2001-01-01				0
+4	c;b;d											1		first						a2001-01-01				0
+EOF
+
+gzip >pl.m3u.gz -c pl.m3u
+muck >stdout -f xxx pl.m3u.gz -e '|q' -q'!~F' -s 'y=nt'
+sed -i '1d' stdout
+diff stdout <<"EOF"
+2	b;c;b											1		first						d2000-01-01				0	z
+4	c;b;d											1		first						a2001-01-01				0
+3	b;c											2		"first"						c2001-01-01				0
+1	c;b;a											2		first						b2001-01-01				0
+EOF
+
+audio >1 mp3 \
+	-metadata artist=Hello \
+	-metadata title=World \
+	-metadata year=2000 \
+	-metadata TBPM=128
+touch -d2000-01-01 1
+
+timeout -sTERM .1 muck -f xxx pl.m3u.gz -q'~\d' -stu-f ||:
+
+zcat pl.m3u.gz >got
+diff got <<"EOF"
+#EXTM3U
+#PLAYLIST:Hello wörld !
+#EXTINF:0 artist="b;c;b" track="1" title="first" date="d2000-01-01" comment="z",
+2
+#EXTINF:5 artist="Hello" title="World" bpm="128" codec="mp3-stereo-44" mtime="2000-01-01",
+1
+F
+#EXTINF:0 artist="b;c" track="2" title="\"first\"" date="c2001-01-01",
+3
+#EXTINF:0 artist="c;b;d" track="1" title="first" date="a2001-01-01",
+4
+F
+EOF
+
+for prefix in '1-2-' '1-' '#'; do
+	seq 1 10000 | sed >numbers "s/^/$prefix/"
+
+	muck <numbers >stdout -f xxx -e '|q' -q "u=${prefix}4097"
+	sed -i '1d' stdout
+	diff stdout <<EOF
+${prefix}4097
+EOF
+
+	muck <numbers >stdout -f xxx -e '|q' -q "u<=${prefix}3"
+	sed -i '1d' stdout
+	diff stdout <<EOF
+${prefix}1
+${prefix}2
+${prefix}3
+EOF
+
+	muck <numbers >stdout -f xxx -e '|q' -q "u>=${prefix}xx9999y"
+	sed -i '1d' stdout
+	diff stdout <<EOF
+${prefix}9999
+${prefix}10000
+EOF
+
+done
+
+muck <numbers >stdout -f xxx -e '|q' -q "u<a3"
+sed -i '1d' stdout
+diff stdout <<EOF
+#1
+#2
+EOF
+
+muck <numbers >stdout -f xxx -e '|q' -q "u>${prefix}9998"
+sed -i '1d' stdout
+diff stdout <<EOF
+#9999
+#10000
+EOF
+
+rm -f *
+
+playlist
+gzip >pl.m3u.gz -c pl.m3u
+audio >1 mp3 \
+	-metadata artist=HelloHelloHelloHelloHelloHello123456789 \
+	-metadata album=BlaBla123456789 \
+	-metadata title=World \
+	-metadata version=C
+touch -d2000-01-01 1
+
+cat >X <<"EOF"
+#!/bin/sh
+env | grep MUCK_
+read
+EOF
+chmod +x X
+
+echo Ciao >search-history
+
+set -f
+SLEEP_SOME='sleep .1' HOME=$PWD MUCK_HOME=. MUCK_COVER=.cover tmux \
+	-f /dev/null \
+	-L muck-test \
+	start-server \;\
+	new-session -d 'timeout 15 muck -f xxx -sU' \;\
+	resize-window -x 80 -y 20 \;\
+	run-shell 'sleep 1' \
+$(
+	printf ' ; send-keys %s ; run-shell $SLEEP_SOME ; capture-pane ; save-buffer -a screens ' \
+		X C-m \
+		L w L w L w L w L w w HHHHH \
+		gl ll \
+		gh \
+		2g \
+		20 '*' \
+		'*' \
+		/O~1 Escape ZZ \
+		/O~Hello Escape ZZ \
+		/ :cq C-m \
+		c \
+		o ZZ
+) \
+	\; send-keys q
+
+sed -i '/^.tmp.muck/d' screens
+
+diff screens <<"EOF"
+MUCK_album=BlaBla123456789
+MUCK_codec=mp3-stereo-44
+MUCK_artist=HelloHelloHelloHelloHelloHello123456789
+MUCK_version=C
+MUCK_PATH=1
+MUCK_mtime=2000-01-01
+MUCK_length=5
+MUCK_playlist=.
+MUCK_url=1
+MUCK_COVER=.cover
+MUCK_HOME=.
+MUCK_index=2
+MUCK_title=World
+MUCK_name=1
+MUCK_visual_index=0
+
+
+
+
+
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+           HelloHelloHelloHelloHelloHello123456789                     BlaBla123
+b2001-01-0 c;b;a
+b2001-01-0 c;b;a
+d2000-01-0 b;c;b
+d2000-01-0 b;c;b
+c2001-01-0 b;c
+c2001-01-0 b;c
+a2001-01-0 c;b;d
+a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+DATE       ARTIST                                    ALBUM ARTIST              D
+           HelloHelloHelloHelloHelloHello123456789
+b2001-01-0 c;b;a
+b2001-01-0 c;b;a
+d2000-01-0 b;c;b
+d2000-01-0 b;c;b
+c2001-01-0 b;c
+c2001-01-0 b;c
+a2001-01-0 c;b;d
+a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ARTIST                                    ALBUM ARTIST              DI ALBUM
+HelloHelloHelloHelloHelloHello123456789                                BlaBla123
+c;b;a
+c;b;a
+b;c;b
+b;c;b
+b;c
+b;c
+c;b;d
+c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ARTIST                         ALBUM ARTIST              DI ALBUM
+HelloHelloHelloHelloHelloHello123456789                     BlaBla123456789
+c;b;a
+c;b;a
+b;c;b
+b;c;b
+b;c
+b;c
+c;b;d
+c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ALBUM ARTIST              DI ALBUM                TR TITLE
+                             BlaBla123456789         World (C)
+                                                   2 first
+                                                   2 first
+                                                   1 first
+                                                   1 first
+                                                   2 "first"
+                                                   2 "first"
+                                                   1 first
+                                                   1 first
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ALBUM ARTIST                              DI ALBUM                TR TITLE
+                                             BlaBla123456789         World (C)
+                                                                   2 first
+                                                                   2 first
+                                                                   1 first
+                                                                   1 first
+                                                                   2 "first"
+                                                                   2 "first"
+                                                                   1 first
+                                                                   1 first
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+DI ALBUM                                     TR TITLE
+   BlaBla123456789                              World (C)
+                                              2 first
+                                              2 first
+                                              1 first
+                                              1 first
+                                              2 "first"
+                                              2 "first"
+                                              1 first
+                                              1 first
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+DI ALBUM                TR TITLE                                    LENGTH GENRE
+   BlaBla123456789         World (C)                                  0:05
+                         2 first                                      0:00
+                         2 first                                      0:00
+                         1 first                                      0:00
+                         1 first                                      0:00
+                         2 "first"                                    0:00
+                         2 "first"                                    0:00
+                         1 first                                      0:00
+                         1 first                                      0:00
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ALBUM                TR TITLE                                    LENGTH GENRE
+BlaBla123456789         World (C)                                  0:05
+                      2 first                                      0:00
+                      2 first                                      0:00
+                      1 first                                      0:00
+                      1 first                                      0:00
+                      2 "first"                                    0:00
+                      2 "first"                                    0:00
+                      1 first                                      0:00
+                      1 first                                      0:00
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ALBUM                                     TR TITLE
+BlaBla123456789                              World (C)
+                                           2 first
+                                           2 first
+                                           1 first
+                                           1 first
+                                           2 "first"
+                                           2 "first"
+                                           1 first
+                                           1 first
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+ALBUM                TR TITLE                                    LENGTH GENRE
+BlaBla123456789         World (C)                                  0:05
+                      2 first                                      0:00
+                      2 first                                      0:00
+                      1 first                                      0:00
+                      1 first                                      0:00
+                      2 "first"                                    0:00
+                      2 "first"                                    0:00
+                      1 first                                      0:00
+                      1 first                                      0:00
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0n.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0g.  0:05 /   0:05 (100%) [Vol: 100%] [====================================>]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0g.  0:05 /   0:05 (100%) [Vol: 100%] [====================================>]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0g.  0:00 /   0:05 (  0%) [Vol: 100%] [                                     ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   2g.  0:02 /   0:05 ( 40%) [Vol: 100%] [=============>                       ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+  20g.  0:02 /   0:05 ( 40%) [Vol: 100%] [=============>                       ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol:  20%] [=============>                       ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+3  c2001-01-0 b;c
+3  c2001-01-0 b;c
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+F
+F
+F
+F
+search-history
+X
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol: -20%] [=============>                       ]
+~1
+
+
+a~'HelloHelloHelloHelloHelloHello123456789'
+T~'BlaBla123456789'
+t~'World'
+v~'C'
+o~'mp3-stereo-44'
+m~'2000-01-01'
+l~'5'
+i~'2'
+k~'0'
+u~'1'
+U~'1'
+p~'.'
+
+# ./search-history:
+Ciao
+-- INSERT --
+~1
+
+
+a~'HelloHelloHelloHelloHelloHello123456789'
+T~'BlaBla123456789'
+t~'World'
+v~'C'
+o~'mp3-stereo-44'
+m~'2000-01-01'
+l~'5'
+i~'2'
+k~'0'
+u~'1'
+U~'1'
+p~'.'
+
+# ./search-history:
+Ciao
+
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+1  b2001-01-0 c;b;a
+1  b2001-01-0 c;b;a
+0  d2000-01-0 b;c;b
+0  d2000-01-0 b;c;b
+4  a2001-01-0 c;b;d
+4  a2001-01-0 c;b;d
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol: -20%] [=============>                       ]
+~Hello
+~1
+
+a~'HelloHelloHelloHelloHelloHello123456789'
+T~'BlaBla123456789'
+t~'World'
+v~'C'
+o~'mp3-stereo-44'
+m~'2000-01-01'
+l~'5'
+i~'2'
+k~'0'
+u~'1'
+U~'1'
+p~'.'
+
+# ./search-history:
+Ciao
+-- INSERT --
+~Hello
+~1
+
+a~'HelloHelloHelloHelloHelloHello123456789'
+T~'BlaBla123456789'
+t~'World'
+v~'C'
+o~'mp3-stereo-44'
+m~'2000-01-01'
+l~'5'
+i~'2'
+k~'0'
+u~'1'
+U~'1'
+p~'.'
+
+# ./search-history:
+Ciao
+
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol: -20%] [=============>                       ]
+~Hello
+~1
+
+a~'HelloHelloHelloHelloHelloHello123456789'
+T~'BlaBla123456789'
+t~'World'
+v~'C'
+o~'mp3-stereo-44'
+m~'2000-01-01'
+l~'5'
+i~'2'
+k~'0'
+u~'1'
+U~'1'
+p~'.'
+
+# ./search-history:
+Ciao
+
+~Hello
+~1
+
+a~'HelloHelloHelloHelloHelloHello123456789'
+T~'BlaBla123456789'
+t~'World'
+v~'C'
+o~'mp3-stereo-44'
+m~'2000-01-01'
+l~'5'
+i~'2'
+k~'0'
+u~'1'
+U~'1'
+p~'.'
+
+# ./search-history:
+Ciao
+:cq
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol: -20%] [=============>                       ]
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol: -20%] Cannot allocate output format: Invalid
+U
+
+# ./sort-history:
+# No such file or directory.
+
+# Keys:
+# +a=artist                HelloHelloHelloHelloHelloHello123456789
+# +A=album_artist
+# +F=album_featured_artist
+# +f=featured_artist
+# +x=remixer
+#  B=barcode
+# +d=disc
+#  D=disc_total
+# +T=album                 BlaBla123456789
+# +V=album_version
+#  N=track_total
+# +n=track
+
+IN DATE       ARTIST                         ALBUM ARTIST              DI ALBUM
+2             HelloHelloHelloHelloHelloHello123456789                     BlaBla
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+   0g.  0:02 /   0:05 ( 40%) [Vol: -20%] [=============>                       ]
+EOF

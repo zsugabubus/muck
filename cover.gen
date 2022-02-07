@@ -1,3 +1,0 @@
-#!/bin/sh
-# Image was taken from https://github.com/mathiasbynens/small.
-od <"${1?Missing input}" -vw999999 -tu1 | sed >"${2?Missing output}" -n '1{s/[0-9a-f]* *//;s/  */,/g;p}'

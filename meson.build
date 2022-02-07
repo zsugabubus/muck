@@ -58,21 +58,43 @@ config.set10('WITH_ICU', icu_dep.found())
 
 configure_file(output: 'config.h', configuration: config)
 
+# Image was taken from https://github.com/mathiasbynens/small.
 cover = custom_target(
-	'Cover',
+	'default cover',
 	input: 'cover.png',
-	output: 'cover.png.h',
-	command: ['cover.gen', '@INPUT0@', '@OUTPUT@'],
+	output: 'cover.h',
+	command: ['hexdump', '-ve', '/1 "%u,"', '--', '@INPUT0@'],
+	capture: true,
 )
 
+muck_deps = [
+	ffmpeg_dep,
+	icu_dep,
+	dependency('ncursesw'),
+	dependency('libpcre2-8'),
+]
+
+src = [
+	'fdata.c',
+	'file.c',
+	'files.c',
+	'files_par.c',
+	'player.c',
+	'playlist.c',
+	'tmpf.c',
+	'rnd.c',
+	'env.c',
+	'error.c',
+	'tui.c',
+	'expr.c',
+
+]
+
 executable('muck',
-	'muck.c', 'rnd.c', cover,
-	dependencies: [
-		ffmpeg_dep,
-		icu_dep,
-		dependency('ncursesw'),
-		dependency('libpcre2-8'),
-	],
+	'muck.c',
+	src,
+	cover,
+	dependencies: muck_deps,
 	install: true,
 )
 
@@ -83,4 +105,24 @@ install_data('muck_playlist.py',
 	install_mode: 'r-xr-xr-x',
 	install_dir: get_option('bindir')
 )
-test('test muck-playlist', find_program('test_muck_playlist'))
+
+test_env = [
+	'BUILD_ROOT=' + meson.build_root(),
+	'WORK_ROOT=' + meson.build_root() / 'test',
+]
+
+test('unit',
+	executable('unit_test',
+		'test/unit_test.c',
+		src,
+		dependencies: muck_deps
+	),
+	is_parallel: false,
+)
+test('functional', find_program('test/functional_test'), env: test_env)
+test('functional_long', find_program('test/functional_test_long'), env: test_env)
+test('muck-playlist', find_program('test/test_muck_playlist'),
+	env: [
+		'PYTHONPATH=' + meson.source_root() + ':',
+	],
+)

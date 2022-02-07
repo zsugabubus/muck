@@ -1,0 +1,15 @@
+#!/bin/sh -xeu
+PATH=$BUILD_ROOT:$PATH
+
+export LC_ALL= TZ=
+
+mkdir -p -- "$WORK_ROOT"
+cd -- "$WORK_ROOT"
+
+ffmpeg -y -t 1ms -f lavfi -i anullsrc -f mp3 short
+
+# No lock-ups.
+! (
+	ulimit -t 10
+	exec muck short short
+)

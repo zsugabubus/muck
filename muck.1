@@ -126,8 +126,8 @@ special case, 0 means key should not be columnized but join it to the previous
 column.
 .IP
 .I KEY
-is a single letter metadata key. The complete list of recognized keys is
-available in search mode.
+is a single letter metadata key. The complete list of recognized keys is shown
+in the search screen.
 .
 .TP
 .BI \-v
@@ -136,7 +136,7 @@ Print version information and exit.
 .SH KEYBINDINGS
 .SS Live mode
 .TP
-.BR 0-9
+.BR 0\-9
 Set
 .IR N
 for next command.
@@ -226,11 +226,11 @@ Toggle show stream information.
 .
 .TP
 .BR /
-Search. See section `SEARCH' for detailed description.
+Search. See `SEARCHING'.
 .
 .TP
 .BR o ,\  =
-Sort. See section `SORT' for detailed description.
+Sort. See `SORTING'.
 .
 .TP
 .B |
@@ -249,13 +249,8 @@ Scroll file list horizontally.
 Toggle column widening. Ignore narrow columns (\[<=]10 cells).
 .
 .TP
-.B M
-Dump detailed metadata information about currently playing file to standard
-error.
-.
-.TP
 .BR Ctrl+L
-Clear status line message, if any, otherwise refresh screen.
+Refresh screen.
 .
 .TP
 .BR q ,\  Z
@@ -300,9 +295,9 @@ Go to bottom.
 (other)
 Same as in live mode.
 .
-.SH SEARCH
-A temporary file is opened and shown for edit to the user. All lines but the
-first one is ignored.
+.SH SEARCHING
+A temporary file is opened and shown for edit. All lines but the first one is
+ignored.
 .P
 .I FIRST-LINE
 :=
@@ -314,6 +309,11 @@ first one is ignored.
 .RI [ KEY ]...
 [ "?" ] [ { "<" | ">" }[ "=" ] | "~" ]
 .RI [ VALUE ]
+.
+.br
+.I EXPR
+:= "!"
+.I EXPR
 .
 .br
 .I EXPR
@@ -330,11 +330,6 @@ first one is ignored.
 :=
 .I EXPR
 "|"
-.I EXPR
-.
-.br
-.I EXPR
-:= "!"
 .I EXPR
 .
 .br
@@ -360,40 +355,11 @@ first one is ignored.
 Tokens may be separated by " " (space).
 .
 .P
-"~" tests whether given PCRE
-.RI ( VALUE )
-matches
-.IR KEY .
-May be omitted since it is the default.
-.IP
-.TS
-tab(@)[];
-lbl.
-t[0-9]+cent@Same as "t~[0-9]cent".
-ftcent@Same as "ftcent~" not "ft~cent".
-t'oast for breakfast'@Can be omitted since "'" makes it clear.
-'oast for breakfast'@Detto but without keys specified.
-.TE
-.
-.P
-"<", ">", "=" compares pairs of integers. All non-digits are ignored in
-between.
-.IP
-.TS
-tab(@)[];
-lbl.
-y<'show tracks before 2001.02.03. please'@Matches "2000", "2000-04.10", "2001X02".
-y<=2001.02.03@Also matches "2001 02 03".
-o~flac o>44@High-resolution FLAC files.
-n?=3@Third tracks.
-.TE
-.
-.P
 If
 .I KEY
-is omitted it defaults to keys marked with "+". In practice, it means almost
-all known metadata in order to ease search of unscanned files. The exact list
-is shown in the search screen, though it is rarely interesting.
+is omitted, it defaults to keys marked with "+". (The list is shown in the
+search screen, though it is rarely interesting.) In practice, it means almost
+all known metadata, in order to ease search of unscanned files.
 .IP
 .TS
 tab(@)[];
@@ -408,7 +374,7 @@ lb^.
 .P
 When multiple
 .IR KEY s
-are specified it matches when any of them is matching.
+are specified, it matches when any of them is matching.
 .IP
 .TS
 tab(@)[];
@@ -416,23 +382,37 @@ lbl.
 axf^Don@Same as "a^Don | x^Don | f^Don".
 .TE
 .
-.P
-If
+.TP
+.BR < ,\  > ,\  =
+Compare pairs of integers given in
 .I VALUE
-is omitted it is taken from the currently playing file.
-For
-.IR KEY s
-with muliplicity (separated by ";") only the first occurence is considered.
+against metadata. All non-digits are ignored in between.
 .IP
 .TS
 tab(@)[];
 lbl.
-T@Tracks from the currently playing album.
-y A T@A bit more specific.
-A@Same as A~'Good' when currently playing file has A='Good;Bad;Ugly'.
+y<'show tracks before 2001.02.03. please'@Matches "2000", "2000-04.10", "2001X02".
+y<=2001.02.03@Also matches "2001 02 03".
+o~flac o>44@High-resolution FLAC files.
+n?=3@Third tracks.
 .TE
 .
-.P
+.TP
+~
+Test whether given PCRE
+.RI ( VALUE )
+matches metadata. (Default operator.)
+.IP
+.TS
+tab(@)[];
+lbl.
+t[0-9]+cent@Same as "t~[0-9]cent".
+ftcent@Same as "ftcent~" not "ft~cent".
+t'oast for breakfast'@Can be omitted since "'" makes it clear.
+'oast for breakfast'@Detto but without keys specified.
+.TE
+.
+.IP
 .I VALUE
 is matched caseless unless it contains uppercase letter (smartcase).
 .IP
@@ -443,14 +423,32 @@ t~ear@Case-insensitive; matches "EAR", "eAR", "Ear" and "Heart".
 t~Ear@Case-sensitive; matches "Ear" only.
 .TE
 .
+.
 .P
-If file has no tags (either because not scanned yet or does not have at all),
+If
+.I VALUE
+is omitted, it is taken from the currently playing file. If metadatum has
+has multiplicity (separated by ";"), only the first occurrence is used.
+.IP
+.TS
+tab(@)[];
+lbl.
+a@Other tracks by the artist.
+T@Tracks from the currently playing album.
+y A T@A bit more specific.
+A@Same as A~'Good' when currently playing file has A='Good;Bad;Ugly'.
+.TE
+.
+.P
+If a file has no metadata (either because not scanned yet or does not have at
+all),
 .IR KEY s
 marked with "+" match
 .I VALUE
-against URL. This behavior can be prevented by "?" that requires
+against URL. (Because it is always known and URL may contain lot's of valuable
+information.) This behavior can be prevented by "?" that requires
 .I KEY
-to be present.
+to be set.
 .IP
 .TS
 tab(@)[];
@@ -462,27 +460,25 @@ n?.@Use "." (match any) after "?" to test whether key is set.
 .TE
 .
 .P
-Between expressions "!", "&", "|" can be used to express
-"negation", "and" and "or" operations, respectively. "&" is the
-default so it may be omitted. "(", ")" can be used for
-grouping.
+Between expressions "!" (negate), "&" (and), "|" (or) operators can be used.
+"&" is the default, so it may be omitted. "(", ")" can be used for grouping.
 .IP
 .TS
 tab(@)[];
 lb l.
 !(g~rock y<2000)@All but rock before 2000.
-!(g~rock & y<2000)@Same but "&" is explicitly written.
+!(g~rock & y<2000)@Same but "&" is explicitly written out.
 !g~rock | (( (y>2000)| y=2000))@Same.
 v~(bla)@Syntax error.
 v~(bla )@Regex syntax error.
 v~(b|a)@Regex syntax error + syntax error.
 v~'(bla)'@Correct.
 v~'(b|a)'@Correct.
-(v'mix\\)')@Matches version containing "mix)".
+(v'mix\)')@Matches version containing "mix)".
 .TE
 .
-.SH SORT
-Similar to `SEARCH'.
+.SH SORTING
+See `SEARCHING'.
 .P
 .I FIRST-LINE
 :=
@@ -493,9 +489,9 @@ Similar to `SEARCH'.
 .I KEY
 [ "=" ] [ "-" ] ]...
 .
-.P
-"=" performs a numeric sort on key. If no numbers are found, it falls back to
-string comparsion.
+.TP
+.B =
+Perform numeric sort. If no numbers are found, fall back to general string comparsion.
 .IP
 .TS
 tab(@)[];
@@ -504,15 +500,16 @@ t=i=@Sort by track number THEN by index. "track-A" and "track-B" will be in corr
 ad=n=ti=@Sort by artists THEN by disc/track number THEN by title THEN by index (just to be stable sort).
 .TE
 .
-.P
-"-" sorts key in the reverse direction.
+.TP
+\-
+Sort in reverse order.
 .IP
 .TS
 tab(@)[];
 lb l.
 m-@Latest added tracks.
 y-@Latest tracks.
-l-@Longest tracks first.
+l-@Longest tracks on the top.
 .TE
 .
 .SH ENVIRONMENT
