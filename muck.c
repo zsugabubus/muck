@@ -946,11 +946,12 @@ eos:
 
 	/* Use most precise date. */
 	if (M_date == m && any) {
-		if (old_fdata_size - fdata->f.metadata[m] < fdata->sz - old_fdata_size) {
+		size_t old_size = old_fdata_size - fdata->f.metadata[m];
+		if (old_size < fdata->sz - old_fdata_size) {
 			memmove(&fdata->buf[fdata->f.metadata[m]],
 					&fdata->buf[old_fdata_size],
 					fdata->sz - old_fdata_size);
-			fdata->sz = old_fdata_size;
+			fdata->sz -= old_size;
 		} else {
 			goto rollback;
 		}
