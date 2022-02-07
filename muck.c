@@ -4613,17 +4613,6 @@ feed_keys(char const *s)
 		feed_key(*s++);
 }
 
-static void
-tui_redirect_stderr(void)
-{
-	struct stat st_stdin, st_stderr;
-	if (fstat(STDIN_FILENO, &st_stdin) < 0 ||
-	    fstat(STDERR_FILENO, &st_stderr) < 0 ||
-	    (st_stdin.st_dev == st_stderr.st_dev &&
-	     st_stdin.st_ino == st_stderr.st_ino))
-		freopen("/dev/null", "w+", stderr);
-}
-
 static int
 tui_init(void)
 {
@@ -4631,6 +4620,13 @@ tui_init(void)
 		return -errno;
 	xassert(0 <= setvbuf(tty, NULL, _IONBF, 0));
 	return 0;
+}
+
+static void
+tui_redirect_stderr(void)
+{
+	if (isatty(STDERR_FILENO))
+		freopen("/dev/null", "w+", stderr);
 }
 
 static void
