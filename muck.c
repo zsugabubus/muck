@@ -3365,6 +3365,7 @@ files_set_filter(ExprParserContext *parser, char *s)
 	filter_changed[filter_index] = 1;
 
 	handle_filter_change(filter_index);
+	notify_event(EVENT_FILE_CHANGED);
 }
 
 static void
@@ -4158,6 +4159,7 @@ files_set_order(char *spec)
 	sort_spec[live] = spec;
 
 	order_changed[live] = 1;
+	notify_event(EVENT_FILE_CHANGED);
 }
 
 static void
