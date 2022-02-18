@@ -41,12 +41,22 @@ F
 EOF
 }
 
-playlist
-
 ! muck -f xxx <<"EOF"
 #EXTM3U
 #EXTINF:0
 EOF
+
+# Non-M3U playlists are respected.
+audio >1 mp3
+cat >pl.m3u <<"EOF"
+1
+EOF
+! timeout .5 muck -f xxx pl.m3u
+diff pl.m3u <<"EOF"
+1
+EOF
+
+playlist
 
 muck <pl.m3u >stdout -f xxx -e '|q' -q'!~F' -s 'a'
 sed -i '1d' stdout

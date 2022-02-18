@@ -387,6 +387,9 @@ playlist_read_m3u(Playlist *playlist, int fd, FileReadError *error)
 	}
 
 out:
+	if (!is_m3u)
+		playlist->read_only = 1;
+
 	close(fd);
 	return;
 
