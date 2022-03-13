@@ -38,6 +38,7 @@ typedef struct {
 	AVFormatContext *format_ctx;
 	AVCodecContext *codec_ctx;
 	AVStream *audio;
+	int header_written;
 } PlayerStream;
 
 #define PLAYER_SEEK_EVENT_INITIALIZER { \
@@ -364,7 +365,7 @@ xdup2(int oldfd, int *newfd)
 static void
 output_close(void)
 {
-	if (out.format_ctx) {
+	if (out.header_written) {
 		int rc = av_write_trailer(out.format_ctx);
 		if (rc < 0)
 			tui_msg_averror("Cannot close output", rc);
@@ -376,6 +377,7 @@ output_close(void)
 		avio_closep(&out.format_ctx->pb);
 		avformat_free_context(out.format_ctx);
 		out.format_ctx = NULL;
+		out.header_written = 0;
 	}
 }
 
@@ -793,6 +795,7 @@ output_configure(AVFrame const *frame, PlayerConfigureEvent *e)
 		goto fail;
 	}
 
+	out.header_written = 1;
 	update_sink_info();
 
 	return 1;
