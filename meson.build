@@ -70,6 +70,7 @@ cover = custom_target(
 muck_deps = [
 	ffmpeg_dep,
 	icu_dep,
+	cc.find_library('m'),
 	dependency('ncursesw'),
 	dependency('libpcre2-8'),
 ]
