@@ -458,10 +458,11 @@ files_seek_rnd(int whence)
 
 	uint8_t filter_index = cur_filter[live];
 	int32_t n = nfiles[filter_index];
-	if (!n)
+	n -= (SEEK_CUR == whence);
+	if (n <= 0)
 		return NULL;
 
-	int32_t pos = rnd_nextn(&rnd, n - (SEEK_CUR == whence));
+	int32_t pos = rnd_nextn(&rnd, n);
 	return files_seek(pos, whence);
 }
 
