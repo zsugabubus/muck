@@ -688,15 +688,6 @@ tui_draw_title(void)
 }
 
 static void
-handle_metadata_change(File *f)
-{
-	files_dirty_single(f);
-
-	if (f == player_get_file())
-		tui_draw_title();
-}
-
-static void
 tui_set_live(int new_live)
 {
 	/* Preserve selection on entering visual mode. */
@@ -709,6 +700,18 @@ tui_set_live(int new_live)
 	cur_number[0] = cur_number[1];
 	number_cmd[0] = '\0';
 	number_cmd[1] = '\0';
+}
+
+void
+tui_handle_files_change(void)
+{
+	if (!live)
+		return;
+
+	/* Ensure currently playing file is not filtered. */
+	File *f = files_seek(0, SEEK_CUR);
+	if (f != player_get_file())
+		tui_notify(TUI_EVENT_EOF_REACHED);
 }
 
 static void
@@ -725,10 +728,16 @@ handle_signotify(int sig)
 				rc = read_stream_metadata(e);
 			else
 				rc = read_metadata(e);
-
 			if (0 < rc) {
 				got_events |= TUI_EVENT_FILES_CHANGED;
-				handle_metadata_change(e->f);
+				files_dirty_single(e->f);
+				if (e->f == player_get_file())
+					tui_draw_title();
+
+				/* Avoid race-condition by sending eof signal
+				 * twice. */
+				if (!(TUI_EVENT_EOF_REACHED & got_events))
+					tui_handle_files_change();
 			}
 		}
 	}
@@ -792,19 +801,6 @@ tui_select(File *f)
 		files_select(f);
 	}
 	tui_notify(TUI_EVENT_FILES_CHANGED | TUI_EVENT_STATUS_LINE_CHANGED);
-}
-
-void
-tui_handle_filter_change(uint8_t filter_index)
-{
-	(void)filter_index;
-	if (!live)
-		return;
-
-	File *f = files_seek(0, SEEK_CUR);
-	File *cur = player_get_file();
-	if (f && cur && f != cur)
-		tui_select(f);
 }
 
 void

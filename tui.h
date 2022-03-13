@@ -33,6 +33,6 @@ void tui_msg_strerror_oom(void);
 
 int tui_shellout(void);
 
-void tui_handle_filter_change(uint8_t filter_index);
+void tui_handle_files_change(void);
 
 #endif

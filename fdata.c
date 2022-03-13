@@ -157,18 +157,21 @@ fdata_writef(FileData *fdata, enum Metadata m, char const *format, ...)
 int
 fdata_write_basic(FileData *fdata, PlayerMetadataEvent const *e)
 {
-	char buf[128];
 	int rc;
-	av_get_channel_layout_string(buf, sizeof buf,
-			e->channels,
-			e->channel_layout);
-	rc = fdata_writef(fdata, M_codec,
-			"%s-%s-%d",
-			e->codec_name,
-			buf,
-			e->sample_rate / 1000);
-	if (rc < 0)
-		return rc;
+
+	if (e->codec_name) {
+		char buf[128];
+		av_get_channel_layout_string(buf, sizeof buf,
+				e->channels,
+				e->channel_layout);
+		rc = fdata_writef(fdata, M_codec,
+				"%s-%s-%d",
+				e->codec_name,
+				buf,
+				e->sample_rate / 1000);
+		if (rc < 0)
+			return rc;
+	}
 
 	if (e->cover_codec_id) {
 		rc = fdata_writef(fdata, M_cover_codec,
@@ -182,7 +185,8 @@ fdata_write_basic(FileData *fdata, PlayerMetadataEvent const *e)
 	/* Preserve. */
 	if (e->f->metadata[M_comment]) {
 		int rc = fdata_writef(fdata, M_comment,
-				"%s", e->f->url + e->f->metadata[M_comment]);
+				"%s",
+				e->f->url + e->f->metadata[M_comment]);
 		if (rc < 0)
 			return rc;
 	}

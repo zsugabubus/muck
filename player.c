@@ -464,22 +464,25 @@ update_metadata(PlayerInput *in)
 	e->f = in->f;
 
 	AVCodecContext *codec_ctx = in->s.codec_ctx;
-	e->sample_rate = codec_ctx->sample_rate;
-	e->codec_name = codec_ctx->codec->name;
-	e->channels = codec_ctx->channels;
-	e->channel_layout = codec_ctx->channel_layout;
+	e->sample_rate = codec_ctx ? codec_ctx->sample_rate : 0;
+	e->codec_name = codec_ctx ? codec_ctx->codec->name : NULL;
+	e->channels = codec_ctx ? codec_ctx->channels : 0;
+	e->channel_layout = codec_ctx ? codec_ctx->channel_layout : 0;
 
 	AVCodecParameters *pars =
 		in->cover_front ? in->cover_front->codecpar : NULL;
 	e->cover_codec_id = pars ? pars->codec_id : AV_CODEC_ID_NONE;
-	assert(e->cover_codec_id || !in->cover_front);
 	e->cover_width = pars ? pars->width : 0;
 
 	AVFormatContext *format_ctx = in->s.format_ctx;
-	e->duration = format_ctx->duration;
+	e->duration = format_ctx ? format_ctx->duration : 0;
 	av_dict_free(&e->metadata);
-	e->metadata = format_ctx->metadata;
-	format_ctx->metadata = NULL;
+	if (format_ctx) {
+		e->metadata = format_ctx->metadata;
+		format_ctx->metadata = NULL;
+	} else {
+		e->metadata = NULL;
+	}
 
 	struct stat st;
 	if (0 <= in->fd && 0 <= fstat(in->fd, &st))
@@ -600,8 +603,6 @@ input_open(PlayerInput *in, PlayerSeekEvent *e)
 		tui_msg_averror("Cannot open codec", rc);
 		return;
 	}
-
-	update_metadata(in);
 }
 
 static int
@@ -844,6 +845,7 @@ source_worker(void *arg)
 			input_open(&in0, e);
 			input_write_cover(&in0);
 			update_source_info();
+			update_metadata(&in0);
 
 			/* Otherwise would be noise. */
 			if (!in0.s.codec_ctx)

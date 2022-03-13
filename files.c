@@ -277,7 +277,6 @@ files_dirty_single(File *f)
 		nfiles[filter_index] += match ? 1 : -1;
 
 		files_dirty_filter(filter_index);
-		tui_handle_filter_change(filter_index);
 	}
 
 	/* Check whether file order changed. */
@@ -448,7 +447,7 @@ files_set_filter(ExprParserContext *parser, char *s)
 	filter_changed[filter_index] = 1;
 
 	files_dirty_filter(filter_index);
-	tui_handle_filter_change(filter_index);
+	tui_handle_files_change();
 	tui_notify(TUI_EVENT_FILES_CHANGED);
 }
 
