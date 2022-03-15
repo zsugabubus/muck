@@ -602,18 +602,6 @@ tui_draw_status_line(void)
 	int64_t clock = player_get_clock();
 	int64_t duration = player_get_duration();
 
-#if 0
-	if (unlikely(AV_LOG_DEBUG <= av_log_get_level())) {
-		uint16_t len = atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head);
-		fprintf(tty, " buf:%"PRId64"kB low:%"PRId64"kB usr:%"PRId64"kB max:%"PRId64"kB pkt:%d",
-				atomic_load_lax(&buffer_bytes) / 1024,
-				atomic_load_lax(&buffer_low) / 1024,
-				atomic_load_lax(&buffer_bytes_max) / 1024,
-				len ? atomic_load_lax(&buffer_bytes) * (UINT16_MAX + 1) / len / 1024 : -1,
-				len);
-	}
-#endif
-
 	int y = LINES - 1;
 
 	move(y, 0);
@@ -653,6 +641,11 @@ tui_draw_status_line(void)
 		addstr(user_msg[user_msg_rd]);
 		attr_set(A_NORMAL, 0, NULL);
 		clrtoeol();
+#if 0
+	} else if (1) {
+		printw(" %s", player_get_debug_info());
+		clrtoeol();
+#endif
 	} else {
 		addstr(" [");
 		int x = getcurx(stdscr);

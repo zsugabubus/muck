@@ -340,6 +340,22 @@ update_sink_info(void)
 	tui_player_notify(PLAYER_EVENT_STREAM_CHANGED);
 }
 
+char const *
+player_get_debug_info(void)
+{
+	static char buf[200];
+
+	uint16_t len = atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head);
+	sprintf(buf, "buf:%"PRId64"kB low:%"PRId64"kB usr:%"PRId64"kB max:%"PRId64"kB pkt:%"PRIu16,
+			atomic_load_lax(&buffer_bytes) / 1024,
+			atomic_load_lax(&buffer_low) / 1024,
+			atomic_load_lax(&buffer_bytes_max) / 1024,
+			len ? atomic_load_lax(&buffer_bytes) * (UINT16_MAX + 1) / len / 1024 : -1,
+			len);
+
+	return buf;
+}
+
 void
 player_init(Error *error)
 {

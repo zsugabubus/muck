@@ -55,6 +55,7 @@ int player_is_paused(void);
 
 char const *player_get_source_info(void);
 char const *player_get_sink_info(void);
+char const *player_get_debug_info(void);
 
 PlayerMetadataEvent *player_get_metadata(void);
 
