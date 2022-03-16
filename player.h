@@ -2,6 +2,7 @@
 #define MUCK_PLAYER_H
 
 #include <libavcodec/avcodec.h>
+#include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
 
 #include "file.h"
@@ -22,8 +23,7 @@ typedef struct PlayerMetadataEvent {
 	int icy;
 	char const *codec_name;
 	int sample_rate;
-	int channels;
-	uint64_t channel_layout;
+	AVChannelLayout ch_layout;
 	enum AVCodecID cover_codec_id;
 	int cover_width;
 	AVDictionary *metadata;

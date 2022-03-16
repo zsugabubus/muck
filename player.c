@@ -14,7 +14,6 @@
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
-#include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
 
 #include "birdlock.h"
@@ -261,6 +260,8 @@ sbprintf(char **pbuf, int *pn, char const *format, ...)
 static void
 print_stream(char **pbuf, int *pn, PlayerStream const *s, int output)
 {
+	static AVChannelLayout const CH_DEFAULT = AV_CHANNEL_LAYOUT_STEREO;
+
 	if (!s->codec_ctx) {
 		sbprintf(pbuf, pn, "(none)");
 		return;
@@ -285,14 +286,11 @@ print_stream(char **pbuf, int *pn, PlayerStream const *s, int output)
 	if (44100 != s->codec_ctx->sample_rate)
 		sbprintf(pbuf, pn, ", %d Hz", s->codec_ctx->sample_rate);
 
-	if (AV_CH_LAYOUT_STEREO != s->codec_ctx->channel_layout) {
+	if (av_channel_layout_compare(&s->codec_ctx->ch_layout, &CH_DEFAULT)) {
 		sbprintf(pbuf, pn, ", ");
-		av_get_channel_layout_string(*pbuf, *pn,
-				s->codec_ctx->channels,
-				s->codec_ctx->channel_layout);
-		int k = strlen(*pbuf);
-		*pbuf += k;
-		*pn -= k;
+		int n = av_channel_layout_describe(&s->codec_ctx->ch_layout, *pbuf, *pn);
+		*pbuf += n;
+		*pn -= n;
 	}
 
 	int64_t bit_rate = s->codec_ctx->bit_rate;
@@ -484,8 +482,10 @@ update_metadata(PlayerInput *in)
 	AVCodecContext *codec_ctx = in->s.codec_ctx;
 	e->sample_rate = codec_ctx ? codec_ctx->sample_rate : 0;
 	e->codec_name = codec_ctx ? codec_ctx->codec->name : NULL;
-	e->channels = codec_ctx ? codec_ctx->channels : 0;
-	e->channel_layout = codec_ctx ? codec_ctx->channel_layout : 0;
+	av_channel_layout_uninit(&e->ch_layout);
+	memset(&e->ch_layout, 0, sizeof e->ch_layout);
+	if (codec_ctx)
+		(void)av_channel_layout_copy(&e->ch_layout, &codec_ctx->ch_layout);
 
 	AVCodecParameters *pars =
 		in->cover_front ? in->cover_front->codecpar : NULL;
@@ -654,7 +654,7 @@ graph_configure(AVBufferSrcParameters *pars, PlayerConfigureEvent *e)
 	av_buffersrc_parameters_set(buffer_ctx, pars);
 
 	char buf[128];
-	av_get_channel_layout_string(buf, sizeof buf, 0, out.codec_ctx->channel_layout);
+	(void)av_channel_layout_describe(&out.codec_ctx->ch_layout, buf, sizeof buf);
 	(void)av_opt_set(format_ctx, "channel_layouts", buf, AV_OPT_SEARCH_CHILDREN);
 
 	(void)av_opt_set(format_ctx, "sample_fmts",
@@ -742,7 +742,7 @@ output_configure(AVFrame const *frame, PlayerConfigureEvent *e)
 	if (out.codec_ctx &&
 	    out.codec_ctx->codec == e->codec &&
 	    out.codec_ctx->sample_rate == frame->sample_rate &&
-	    out.codec_ctx->channels == frame->channels)
+	    !av_channel_layout_compare(&out.codec_ctx->ch_layout, &frame->ch_layout))
 		return 0;
 
 	if (!e->codec) {
@@ -789,8 +789,11 @@ output_configure(AVFrame const *frame, PlayerConfigureEvent *e)
 	if (out.format_ctx->flags & AVFMT_GLOBALHEADER)
 		out.codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-	out.codec_ctx->channels = frame->channels;
-	out.codec_ctx->channel_layout = av_get_default_channel_layout(out.codec_ctx->channels);
+	rc = av_channel_layout_copy(&out.codec_ctx->ch_layout, &frame->ch_layout);
+	if (rc < 0) {
+		tui_msg_averror("Could not copy channel layout", rc);
+		goto fail;
+	}
 	out.codec_ctx->sample_rate = frame->sample_rate;
 	out.codec_ctx->sample_fmt = e->codec->sample_fmts[0];
 	out.codec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
@@ -1132,7 +1135,10 @@ sink_worker(void *arg)
 #define xmacro(x) (graph_changed |= pars->x != frame->x, pars->x = frame->x)
 		xmacro(format);
 		xmacro(sample_rate);
-		xmacro(channel_layout);
+		if (av_channel_layout_compare(&pars->ch_layout, &frame->ch_layout)) {
+			graph_changed = 1;
+			(void)av_channel_layout_copy(&pars->ch_layout, &frame->ch_layout);
+		}
 #undef xmacro
 
 		rc = output_configure(frame, e);

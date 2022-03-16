@@ -161,9 +161,7 @@ fdata_write_basic(FileData *fdata, PlayerMetadataEvent const *e)
 
 	if (e->codec_name) {
 		char buf[128];
-		av_get_channel_layout_string(buf, sizeof buf,
-				e->channels,
-				e->channel_layout);
+		(void)av_channel_layout_describe(&e->ch_layout, buf, sizeof buf);
 		rc = fdata_writef(fdata, M_codec,
 				"%s-%s-%d",
 				e->codec_name,
