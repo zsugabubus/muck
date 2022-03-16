@@ -12,6 +12,11 @@
 #include "config.h"
 #include "playlist.h"
 
+#include <libavcodec/avcodec.h>
+#include <libavdevice/avdevice.h>
+#include <libavfilter/avfilter.h>
+#include <libavformat/avformat.h>
+
 #define FEATURES \
 	/* xmacro(flag, name) */ \
 	xmacro(WITH_ICU, "icu")
@@ -168,6 +173,18 @@ main(int argc, char *argv[])
 			puts(MUCK_VERSION);
 			puts("Features:" FEATURES);
 #undef xmacro
+			printf("FFmpeg %s:\n"
+					"  %s: %s\n"
+					"  %s: %s\n"
+					"  %s: %s\n"
+					"  %s: %s\n"
+					"  %s: %s\n",
+					av_version_info(),
+					LIBAVUTIL_IDENT, avutil_configuration(),
+					LIBAVCODEC_IDENT, avcodec_configuration(),
+					LIBAVFORMAT_IDENT, avformat_configuration(),
+					LIBAVFILTER_IDENT, avfilter_configuration(),
+					LIBAVDEVICE_IDENT, avdevice_configuration());
 			return EXIT_SUCCESS;
 
 		default:
