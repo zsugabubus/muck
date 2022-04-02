@@ -11,7 +11,6 @@ project('muck', 'c',
 add_project_arguments([
 	'-D_DEFAULT_SOURCE',
 	'-D_GNU_SOURCE',
-	'-D_XOPEN_SOURCE=700',
 	'-DMUCK_VERSION="@0@ @1@"'.format(
 		meson.project_name(),
 		meson.project_version(),
