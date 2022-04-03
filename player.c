@@ -843,7 +843,7 @@ source_worker(void *arg)
 		S_STOPPED,
 		S_STALLED,
 	} state = S_STALLED;
-	int64_t buffer_full_bytes = 0;
+	int64_t buffer_high = 0;
 
 	for (;;) {
 		int rc;
@@ -876,6 +876,7 @@ source_worker(void *arg)
 			flush_output = S_STALLED != state;
 			state = S_RUNNING;
 			seek_buffer(INT64_MIN);
+			buffer_high = atomic_load_lax(&buffer_bytes_max);
 		}
 
 		if (likely(in0.s.codec_ctx)) {
@@ -928,16 +929,24 @@ source_worker(void *arg)
 	no_event:
 
 		int64_t tmp;
-		if (unlikely(S_STALLED <= state) ||
+		if (/* Decoder stopped. */
+		    unlikely(S_STALLED <= state) ||
+		    /* Paused, do nothing. */
 		    unlikely(atomic_load_lax(&paused)) ||
+		    /* Buffer is loaded with enough data. */
 		    (0 < (tmp = atomic_load_lax(&buffer_low)) ? tmp : buffer_bytes_max) <=
 		     atomic_load_explicit(&buffer_bytes, memory_order_acquire) ||
+		     /* Buffer is completely full. */
 		    (unlikely(buffer_tail + 1 == atomic_load_lax(&buffer_head)) &&
-		     (buffer_full_bytes = atomic_load_lax(&buffer_bytes), 1)))
+		      /* buffer_bytes_max is too high so lower it. */
+		     (buffer_high = atomic_load_lax(&buffer_bytes), 1)))
 		{
 		wait:;
-			if (S_STOPPED == state &&
-			    atomic_load_lax(&buffer_head) == atomic_load_lax(&buffer_tail)) {
+			if (/* No more frames will arrive because decoder stopped. */
+			    S_STOPPED == state &&
+			    /* Buffer empty. */
+			    atomic_load_lax(&buffer_head) == atomic_load_lax(&buffer_tail))
+			{
 			eof_reached:;
 				state = S_STALLED;
 				/* TODO: Seek commands should fill in1 first. */
@@ -945,7 +954,7 @@ source_worker(void *arg)
 			}
 
 			atomic_store_lax(&buffer_low, S_RUNNING == state
-					? buffer_full_bytes / 2
+					? buffer_high / 2
 					: 0);
 			player_wait(&source_signal);
 			continue;
