@@ -7,7 +7,7 @@ mkdir -p -- "$WORK_ROOT"
 cd -- "$WORK_ROOT"
 
 diff() {
-	command diff >&2 -BZ - "$@"
+	command diff >&2 -BZu - "$@"
 }
 
 audio() {
@@ -84,7 +84,7 @@ audio >1 mp3 \
 	-metadata TBPM=128
 touch -d2000-01-01 1
 
-timeout -sTERM .1 muck -f xxx pl.m3u.gz -q'~\d' -stu-f ||:
+timeout -sTERM .1 muck -f xxx pl.m3u.gz -q'~\d' -stu-f -ep ||:
 
 zcat pl.m3u.gz >got
 diff got <<"EOF"
@@ -162,14 +162,17 @@ chmod +x X
 
 echo Ciao >search-history
 
+# NOTE: Okay I'm too tired now. Test only succeeds if you watch it:
+# tmux -L tmux-test attach
+
 set -f
 SLEEP_SOME='sleep .1' HOME=$PWD MUCK_HOME=. MUCK_COVER=.cover tmux \
 	-f /dev/null \
 	-L muck-test \
 	start-server \;\
-	new-session -d 'timeout 15 muck -f xxx -sU' \;\
+	new-session -d 'timeout 30 muck -f xxx -sU' \;\
 	resize-window -x 80 -y 20 \;\
-	run-shell 'sleep 1' \
+	run-shell 'sleep 3' \
 $(
 	printf ' ; send-keys %s ; run-shell $SLEEP_SOME ; capture-pane ; save-buffer -a screens ' \
 		X C-m \
