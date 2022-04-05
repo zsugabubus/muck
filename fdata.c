@@ -234,6 +234,6 @@ changed:
 
 	memcpy(f->metadata, fdata->f.metadata, sizeof f->metadata);
 
-	return 0;
+	return 1;
 }
 

@@ -231,7 +231,7 @@ test_fdata(void)
 	assert(0 <= fdata_write_date(fd, M_artist, 1000000000));
 	assert(0 <= fdata_writef(fd, M_title, " %s-%s ", "a", "b"));
 
-	assert(0 <= fdata_save(fd, f));
+	assert(0 < fdata_save(fd, f));
 	assert(playlist->modified);
 	playlist->modified = 0;
 
@@ -255,7 +255,7 @@ test_fdata(void)
 	APPEND_FDATA(M_date, "   1999          ");
 	APPEND_FDATA(M_track, " 00T/ TTx");
 
-	assert(0 <= fdata_save(fd, f));
+	assert(0 < fdata_save(fd, f));
 	assert(playlist->modified);
 	playlist->modified = 0;
 
@@ -267,7 +267,7 @@ test_fdata(void)
 	ASSERT_FDATA(M_track_total, "TT");
 	ASSERT_FDATA(M_date, "2003-apr-05");
 
-	assert(0 <= fdata_save(fd, f));
+	assert(!fdata_save(fd, f));
 	assert(!playlist->modified);
 
 	ASSERT_FDATA(MX_url, "./a/b");
