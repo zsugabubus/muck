@@ -263,12 +263,10 @@ read_metadata(PlayerMetadataEvent const *e)
 	if (fdata_write_basic(&fdata, e) < 0)
 		goto fail_too_long;
 
-	if (fdata_save(&fdata, f) < 0) {
+	int rc = fdata_save(&fdata, f);
+	if (rc < 0)
 		tui_msg_strerror_oom();
-		return -1;
-	}
-
-	return 1;
+	return rc;
 
 fail_too_long:
 	tui_msgf("Too much metadata");
@@ -312,12 +310,10 @@ read_stream_metadata(PlayerMetadataEvent const *e)
 		(void)fdata_writef(&fdata,
 				M_genre, "%s", t->value);
 
-	if (fdata_save(&fdata, f) < 0) {
+	int rc = fdata_save(&fdata, f);
+	if (rc < 0)
 		tui_msg_strerror_oom();
-		return -1;
-	}
-
-	return 1;
+	return rc;
 }
 
 static void
