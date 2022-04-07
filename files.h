@@ -26,8 +26,6 @@ extern int live;
  */
 extern uint8_t cur_filter[2];
 
-extern char *search_history[10]; /* FIXME: It seems like a hack in its current state. */
-
 void files_init(Error *error);
 void files_destroy(void);
 
@@ -39,7 +37,8 @@ void files_plumb(FILE *stream);
 
 void files_set_live(int new_live);
 void files_set_order(char *spec);
-void files_set_filter(ExprParserContext *parser, char *s);
+void files_reset_order(void);
+void files_set_filter(ExprParserContext *parser, char const *s);
 
 char const *files_get_order(void);
 

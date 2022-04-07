@@ -52,23 +52,6 @@ uint8_t cur_filter[2] = {
 	FILTER_FILES,
 	FILTER_FILES,
 };
-char *search_history[10];
-
-static void
-push_history(char **history, size_t nhistory, char *s)
-{
-	char *carry = history[0];
-	history[0] = s;
-	for (size_t i = 1; i < nhistory && carry; ++i) {
-		if (!strcmp(carry, s)) {
-			free(carry);
-			return;
-		}
-
-		SWAP(char *, history[i], carry);
-	}
-	free(carry);
-}
 
 static Expr *
 parse_filter_spec(ExprParserContext *parser, char const *s)
@@ -430,10 +413,8 @@ files_set_order(char *spec)
 }
 
 void
-files_set_filter(ExprParserContext *parser, char *s)
+files_set_filter(ExprParserContext *parser, char const *s)
 {
-	push_history(search_history, FF_ARRAY_ELEMS(search_history), s);
-
 	Expr *query = parse_filter_spec(parser, s);
 	if (!query)
 		return;
@@ -550,9 +531,6 @@ files_destroy(void)
 	if (sort_ucol)
 		ucol_close(sort_ucol);
 #endif
-
-	for (size_t i = 0; i < FF_ARRAY_ELEMS(search_history); ++i)
-		free(search_history[i]);
 
 	for (int i = 0; i < 2; ++i)
 		if (DEFAULT_SORT_SPEC != sort_spec[i])

@@ -58,6 +58,8 @@ static int32_t cur_number[2];
 static char seek_cmd = 'n';
 static unsigned cur_track = 0;
 
+static char *search_history[10];
+
 static int
 tui_is_focused(void)
 {
@@ -78,6 +80,9 @@ void
 tui_destroy(void)
 {
 	tui_stop();
+
+	for (size_t i = 0; i < FF_ARRAY_ELEMS(search_history); ++i)
+		free(search_history[i]);
 }
 
 static void
@@ -956,10 +961,27 @@ tui_set_order_visual(void)
 }
 
 static void
+push_history(char **history, size_t nhistory, char *s)
+{
+	char *carry = history[0];
+	history[0] = s;
+	for (size_t i = 1; i < nhistory && carry; ++i) {
+		if (!strcmp(carry, s)) {
+			free(carry);
+			return;
+		}
+
+		SWAP(char *, history[i], carry);
+	}
+	free(carry);
+}
+
+static void
 tui_set_filter_visual(void)
 {
 	ExprParserContext parser;
 	error_reset(&parser.error);
+	parser.src = NULL;
 
 reopen:
 	Error error;
@@ -968,6 +990,7 @@ reopen:
 	FILE *stream = tmpf_open(&tmpf, &error);
 	if (!stream) {
 		tui_msg_error(&error);
+		free((char *)parser.src);
 		return;
 	}
 
@@ -977,6 +1000,7 @@ reopen:
 				(int)(parser.ptr - parser.src), parser.src,
 				parser.ptr,
 				parser.error.msg);
+	free((char *)parser.src);
 
 	int any = 0;
 	for (size_t i = 0; i < FF_ARRAY_ELEMS(search_history) && search_history[i]; ++i)
@@ -1018,6 +1042,8 @@ reopen:
 	files_set_filter(&parser, line);
 	if (!error_is_ok(&parser.error))
 		goto reopen;
+
+	push_history(search_history, FF_ARRAY_ELEMS(search_history), line);
 }
 
 void
