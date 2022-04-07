@@ -113,15 +113,15 @@ test_env = [
 
 test('unit',
 	executable('unit_test',
-		'test/unit_test.c',
+		'tests/unit_test.c',
 		src,
 		dependencies: muck_deps
 	),
 	is_parallel: false,
 )
-test('functional', find_program('test/functional_test'), env: test_env)
-test('functional_long', find_program('test/functional_test_long'), env: test_env)
-test('muck-playlist', find_program('test/test_muck_playlist'),
+test('functional', find_program('tests/functional_test'), env: test_env)
+test('functional_long', find_program('tests/functional_test_long'), env: test_env)
+test('muck-playlist', find_program('tests/test_muck_playlist'),
 	env: [
 		'PYTHONPATH=' + meson.source_root() + ':',
 	],
