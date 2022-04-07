@@ -1,0 +1,73 @@
+From 62da56909e3cfa8d472e2ab602b81d17015ae45c Mon Sep 17 00:00:00 2001
+From: zsugabubus <zsugabubus@users.noreply.github.com>
+Date: Mon, 3 May 2021 17:36:40 +0200
+Subject: [PATCH] avformat/file: Detect seekable pipe
+
+---
+ libavformat/file.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/libavformat/file.c b/libavformat/file.c
+index 4ceb2d39be..95d0388751 100644
+--- a/libavformat/file.c
++++ b/libavformat/file.c
+@@ -85,12 +85,13 @@ static const AVOption file_options[] = {
+     { "truncate", "truncate existing files on write", offsetof(FileContext, trunc), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
+     { "blocksize", "set I/O operation maximum block size", offsetof(FileContext, blocksize), AV_OPT_TYPE_INT, { .i64 = INT_MAX }, 1, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
+     { "follow", "Follow a file as it is being written", offsetof(FileContext, follow), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+-    { "seekable", "Sets if the file is seekable", offsetof(FileContext, seekable), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 0, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_ENCODING_PARAM },
++    { "seekable", "set if file is seekable", offsetof(FileContext, seekable), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 0, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_ENCODING_PARAM },
+     { NULL }
+ };
+ 
+ static const AVOption pipe_options[] = {
+     { "blocksize", "set I/O operation maximum block size", offsetof(FileContext, blocksize), AV_OPT_TYPE_INT, { .i64 = INT_MAX }, 1, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
++    { "seekable", "set if file is seekable", offsetof(FileContext, seekable), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 0, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_ENCODING_PARAM },
+     { NULL }
+ };
+ 
+@@ -234,17 +235,16 @@ static int file_open(URLContext *h, const char *filename, int flags)
+     if (fd == -1)
+         return AVERROR(errno);
+     c->fd = fd;
+-
+-    h->is_streamed = !fstat(fd, &st) && S_ISFIFO(st.st_mode);
++    if (c->seekable >= 0)
++        h->is_streamed = !c->seekable;
++    else
++        h->is_streamed = lseek(c->fd, 0, SEEK_CUR) < 0;
+ 
+     /* Buffer writes more than the default 32k to improve throughput especially
+      * with networked file systems */
+     if (!h->is_streamed && flags & AVIO_FLAG_WRITE)
+         h->min_packet_size = h->max_packet_size = 262144;
+ 
+-    if (c->seekable >= 0)
+-        h->is_streamed = !c->seekable;
+-
+     return 0;
+ }
+ 
+@@ -396,7 +396,10 @@ static int pipe_open(URLContext *h, const char *filename, int flags)
+     setmode(fd, O_BINARY);
+ #endif
+     c->fd = fd;
+-    h->is_streamed = 1;
++    if (c->seekable >= 0)
++        h->is_streamed = !c->seekable;
++    else
++        h->is_streamed = lseek(c->fd, 0, SEEK_CUR) < 0;
+     return 0;
+ }
+ 
+@@ -405,6 +408,7 @@ const URLProtocol ff_pipe_protocol = {
+     .url_open            = pipe_open,
+     .url_read            = file_read,
+     .url_write           = file_write,
++    .url_seek            = file_seek,
+     .url_get_file_handle = file_get_handle,
+     .url_check           = file_check,
+     .priv_data_size      = sizeof(FileContext),
+-- 
+2.34.1
+
