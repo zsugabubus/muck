@@ -29,6 +29,7 @@ extern uint8_t cur_filter[2];
 void files_init(Error *error);
 void files_destroy(void);
 
+File *files_seek_wrap(int32_t pos, int whence, int wrap);
 File *files_seek(int32_t pos, int whence);
 File *files_seek_rnd(int whence);
 
@@ -39,6 +40,8 @@ void files_set_live(int new_live);
 void files_set_order(char *spec);
 void files_reset_order(void);
 void files_set_filter(ExprParserContext *parser, char const *s);
+
+int files_move(File const *f, int32_t pos, int whence);
 
 char const *files_get_order(void);
 

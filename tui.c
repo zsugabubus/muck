@@ -52,8 +52,7 @@ static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoOm*z";
 
 static pthread_t tui_thread;
 
-static char number_cmd[2];
-static int32_t cur_number[2];
+static int32_t cur_number;
 
 static char seek_cmd = 'n';
 static unsigned cur_track = 0;
@@ -597,6 +596,12 @@ tui_draw_cursor(void)
 	move(sel_y, sel_x);
 }
 
+static int
+has_number(void)
+{
+	return 0 <= cur_number;
+}
+
 static void
 tui_draw_status_line(void)
 {
@@ -608,7 +613,8 @@ tui_draw_status_line(void)
 	move(y, 0);
 
 	attr_set(live ? A_REVERSE : A_NORMAL, 0, NULL);
-	printw("%4"PRId32, cur_number[live]);
+	if (has_number())
+		printw("%"PRId32, cur_number);
 	addch(seek_cmd);
 	addch(player_is_paused() ? '.' : '>');
 
@@ -691,9 +697,7 @@ tui_set_live(int new_live)
 
 	files_set_live(new_live);
 
-	cur_number[0] = cur_number[1];
-	number_cmd[0] = '\0';
-	number_cmd[1] = '\0';
+	cur_number = -1;
 }
 
 void
@@ -764,22 +768,10 @@ handle_signotify(int sig)
 	}
 }
 
-static void
-use_number(char c, int32_t def)
-{
-	if ('0' == number_cmd[live])
-		number_cmd[live] = c;
-	else if (c != number_cmd[live])
-		cur_number[live] = def;
-}
-
 static int32_t
 get_number(int32_t def)
 {
-	if ('0' == number_cmd[live])
-		return cur_number[live];
-	else
-		return def;
+	return has_number() ? cur_number : def;
 }
 
 void
@@ -948,7 +940,7 @@ tui_set_order_visual(void)
 
 	cat_history_file("sort-history", stream);
 
-	File *cur = files_seek(0, SEEK_CUR);
+	File const *cur = files_seek(0, SEEK_CUR);
 	print_syntax_help(cur, stream);
 
 	fclose(stream);
@@ -1012,7 +1004,7 @@ reopen:
 		fputc('\n', stream);
 	fputc('\n', stream);
 
-	File *cur = files_seek(0, SEEK_CUR);
+	File const *cur = files_seek(0, SEEK_CUR);
 	if (cur) {
 		for (enum MetadataX i = 0; i < MX_NB; ++i) {
 			char buf[FILE_METADATAX_BUFSZ];
@@ -1046,99 +1038,86 @@ reopen:
 	push_history(search_history, FF_ARRAY_ELEMS(search_history), line);
 }
 
+static void
+tui_set_filter_nohistory(char const *s)
+{
+	ExprParserContext parser;
+	error_reset(&parser.error);
+	files_set_filter(&parser, s);
+	if (!error_is_ok(&parser.error))
+		tui_msg_error(&parser.error);
+}
+
+static void
+tui_select_page(int dir, int half)
+{
+	int n = (LINES - 2) >> half;
+	tui_select(files_seek_wrap(n * dir, SEEK_CUR, 0));
+}
+
 void
 tui_feed_key(int c)
 {
 	if ('0' <= c && c <= '9') {
-		cur_number[live] = 10 * get_number(0) + (c - '0');
-		number_cmd[live] = '0';
+		cur_number = 10 * get_number(0) + (c - '0');
 		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
 		return;
 	}
 
 	switch (c) {
-	case CONTROL('D'):
-		number_cmd[live] = '0';
-		cur_number[live] = (LINES - 2) / 2;
-		c = 'n';
-		break;
-
-	case CONTROL('U'):
-		number_cmd[live] = '0';
-		cur_number[live] = (LINES - 2) / 2;
-		c = 'p';
-		break;
-
-	case CONTROL('M'):
+	case 'n': /* Next. */
+	case KEY_DOWN:
+	case 'N':
+	case 'p': /* Previous. */
+	case KEY_UP:
+	{
+		char old_seek_cmd = seek_cmd;
+		int dir = 'n' == c || KEY_DOWN == c ? 1 : -1;
 		if (live)
-			c = seek_cmd;
-		break;
-	}
-
-	switch (c) {
-	case '*':
-		player_set_volume(MAXMIN(-100, get_number(-player_get_volume()), 100));
+			seek_cmd = 0 < dir ? 'n' : 'p';
 		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
-		break;
 
-	case '+':
-		player_set_volume(MIN(abs(player_get_volume()) + 1, 100));
-		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
-		break;
-
-	case '-':
-		player_set_volume(MAX(0, abs(player_get_volume()) - 2));
-		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
-		break;
-
-	case 'v':
-		tui_set_live(live ^ 1);
-		tui_notify(TUI_EVENT_FILES_CHANGED | TUI_EVENT_STATUS_LINE_CHANGED);
-		break;
-
-	case 't': /* Tracks. */
-	{
-		unsigned n = player_get_ntracks();
-		if (n) {
-			cur_track += 1;
-			cur_track %= n;
-			File *cur = player_get_file();
-			if (cur)
-				player_seek_file(cur, player_get_clock(), cur_track);
-		}
-	}
-		break;
-
-	case '/': /* Search. */
-		tui_set_filter_visual();
-		break;
-
-	case '|':
-		if (isatty(fileno(stdout))) {
-			Error error;
-			error_reset(&error);
-			TemporaryFile tmpf;
-			FILE *stream = tmpf_open(&tmpf, &error);
-			if (!stream)
-				break;
-
-			files_plumb(stream);
-			fclose(stream);
-
-			free(tmpf_readline(&tmpf));
-		} else {
-			files_plumb(stdout);
-		}
-		break;
-
-	case 'e': /* Edit. */
-	{
-		if (live) {
-			player_seek(1, SEEK_CUR);
+		if ('g' == old_seek_cmd)
 			break;
-		}
 
+		tui_select(files_seek(get_number(1) * dir, SEEK_CUR));
 	}
+		break;
+
+	case 'g': /* Go to. */
+	case KEY_HOME:
+	{
+		if (live)
+			seek_cmd = 'g';
+		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+
+		if (live) {
+			int32_t n = get_number(0);
+			uint64_t ts =
+				n / 100 * 60 /* min */ +
+				n % 100 /* sec */;
+			player_seek(ts, SEEK_SET);
+		} else {
+			tui_select(files_seek(0, SEEK_SET));
+		}
+	}
+		break;
+
+	case 'G': /* GO TO. */
+	case KEY_END:
+		if (has_number()) {
+			if (live) {
+				/* Stay close to file, even if it fails to play. */
+				if ('p' != seek_cmd && 'n' != seek_cmd) {
+					seek_cmd = 'n';
+					tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+				}
+			}
+
+			tui_select(files_seek_wrap(cur_number, SEEK_SET, 0));
+		} else {
+			tui_select(files_seek(0, SEEK_END));
+		}
 		break;
 
 	case 'r': /* Random. */
@@ -1153,61 +1132,44 @@ tui_feed_key(int c)
 		tui_select(files_seek_rnd(SEEK_CUR));
 		break;
 
-	case 'n': /* Next. */
-	case KEY_DOWN:
-	case 'N':
-	case 'p': /* Previous. */
-	case KEY_UP:
-	{
-		char old_seek_cmd = seek_cmd;
-		int dir = 'n' == c || KEY_DOWN == c ? 1 : -1;
-		if (live)
-			seek_cmd = 0 < dir ? 'n' : 'p';
-		use_number('n', 1);
-		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+	case CONTROL('D'):
+	case CONTROL('U'):
+		tui_select_page(CONTROL('D') == c ? 1 : -1, 1);
+		break;
 
-		if ('g' == old_seek_cmd)
+	case KEY_NPAGE:
+	case CONTROL('F'):
+	case KEY_PPAGE:
+	case CONTROL('B'):
+		tui_select_page(KEY_NPAGE == c || CONTROL('F') == c ? 1 : -1, 0);
+		break;
+
+	case CONTROL('M'):
+	{
+		if (live) {
+			tui_feed_key(seek_cmd);
+			return;
+		}
+
+		File *f = files_seek(0, SEEK_CUR);
+		if (!f)
 			break;
 
-		tui_select(files_seek(cur_number[live] * dir, SEEK_CUR));
+		int old_live = live;
+		files_set_live(1);
+		tui_select(f);
+		files_set_live(old_live);
+
+		player_pause(0);
 	}
 		break;
 
-	case 'g': /* Go to. */
-	case KEY_HOME:
-	{
-		if (live)
-			seek_cmd = 'g';
-		use_number('g', 0);
-		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
-
-		if (live) {
-			uint64_t ts =
-				cur_number[live] / 100 * 60 /* min */ +
-				cur_number[live] % 100 /* sec */;
-			player_seek(ts, SEEK_SET);
-		} else {
-			tui_select(files_seek(0, SEEK_SET));
-		}
-	}
+	case 'e':
+		player_seek(1, SEEK_CUR);
 		break;
 
-	case 'G': /* GO TO. */
-	case KEY_END:
-		if (live) {
-			int32_t n = get_number(100 * 3 / 8);
-			player_seek(player_get_duration() * n / 100, SEEK_SET);
-		} else {
-			tui_select(files_seek(0, SEEK_END));
-		}
-		break;
-
-	case 'H':
-	case KEY_SLEFT:
-	case 'L':
-	case KEY_SRIGHT:
-		left += 'H' == c || KEY_SLEFT == c ? -1 : 1;
-		tui_notify(TUI_EVENT_FILES_CHANGED);
+	case 'b':
+		player_seek(-2, SEEK_CUR);
 		break;
 
 	case 'h':
@@ -1234,6 +1196,34 @@ tui_feed_key(int c)
 	}
 		break;
 
+	case '*':
+		player_set_volume(MAXMIN(-100, get_number(-player_get_volume()), 100));
+		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+		break;
+
+	case '+':
+		player_set_volume(MIN(abs(player_get_volume()) + 1, 100));
+		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+		break;
+
+	case '-':
+		player_set_volume(MAX(0, abs(player_get_volume()) - 2));
+		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+		break;
+
+	case 't': /* Tracks. */
+	{
+		unsigned n = player_get_ntracks();
+		if (n) {
+			cur_track += 1;
+			cur_track %= n;
+			File *cur = player_get_file();
+			if (cur)
+				player_seek_file(cur, player_get_clock(), cur_track);
+		}
+	}
+		break;
+
 	case '.':
 	case '>':
 		player_pause('.' == c);
@@ -1244,21 +1234,40 @@ tui_feed_key(int c)
 		player_pause(!player_is_paused());
 		break;
 
-	case 'a': /* After. */
-	case 'b': /* Before. */
-		if (live && 'b' == c) {
-			player_seek(-2, SEEK_CUR);
-			break;
-		}
+	case 'f':
+	case '/': /* Search. */
+		tui_set_filter_visual();
+		break;
 
-		/* TODO: Put current file at the beginning/at the end
-		 * of the selected playlist. Choosing "."/"#" places
-		 * before/after currently playing file. */
+	case 'F':
+		tui_set_filter_nohistory("");
 		break;
 
 	case 'A':
+		tui_set_filter_nohistory("a");
+		break;
+
 	case 'B':
-		/* TODO: Just like "a" but for all filtered files. */
+		tui_set_filter_nohistory("a A");
+		break;
+
+	case 'T':
+		tui_set_filter_nohistory("a t");
+		break;
+
+	case 'E':
+		/* TODO: Implement edit playlist. INDEX{^I}NAME. Either removes
+		 * from playlist or changes filter mask. */
+		break;
+
+	case 'm':
+	case 'M':
+		/* TODO: Implement move single/all file(s) to other pane/mode. */
+		break;
+
+	case CONTROL('I'):
+	case CONTROL('W'):
+		/* TODO: Implement switch mode/pane. */
 		break;
 
 	case 'o':
@@ -1266,31 +1275,80 @@ tui_feed_key(int c)
 		tui_set_order_visual();
 		break;
 
+	case 'O':
+		files_reset_order();
+		break;
+
+	case 'I':
+	{
+		char *s = strdup("i=p");
+		if (s)
+			files_set_order(s);
+	}
+		break;
+
+	case 'J':
+	case 'K':
+	{
+		File const *f = files_seek(0, SEEK_CUR);
+		if (!f)
+			break;
+		if (has_number()) {
+			if (!files_move(f, cur_number, SEEK_SET))
+				break;
+		} else {
+			int dir = 'J' == c ? 1 : -1;
+			if (!files_move(f, dir, SEEK_CUR))
+				break;
+		}
+		tui_notify(TUI_EVENT_FILES_CHANGED);
+	}
+		break;
+
+	case '|':
+		if (isatty(fileno(stdout))) {
+			Error error;
+			error_reset(&error);
+			TemporaryFile tmpf;
+			FILE *stream = tmpf_open(&tmpf, &error);
+			if (!stream)
+				break;
+
+			files_plumb(stream);
+			fclose(stream);
+
+			free(tmpf_readline(&tmpf));
+		} else {
+			files_plumb(stdout);
+		}
+		break;
+
+	case 'H':
+	case KEY_SLEFT:
+	case 'L':
+	case KEY_SRIGHT:
+		left += 'H' == c || KEY_SLEFT == c ? -1 : 1;
+		tui_notify(TUI_EVENT_FILES_CHANGED);
+		break;
+
 	case 'w':
 		widen ^= 1;
 		tui_notify(TUI_EVENT_FILES_CHANGED);
 		break;
 
-	case 's': /* Set. */
-	{
-		int64_t n = get_number(0);
-
-		if (live) {
-			/* Stay close to file, even if it fails to play. */
-			if ('p' != seek_cmd && 'n' != seek_cmd) {
-				seek_cmd = 'n';
-				number_cmd[live] = '\0';
-				tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
-			}
-		}
-
-		tui_select(files_seek(n, SEEK_SET));
-	}
+	case 'v':
+		tui_set_live(live ^ 1);
+		tui_notify(TUI_EVENT_FILES_CHANGED | TUI_EVENT_STATUS_LINE_CHANGED);
 		break;
 
 	case 'i':
 		atomic_fetch_xor_lax(&show_stream, 1);
 		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
+		break;
+
+	case CONTROL('L'):
+		clear();
+		tui_notify(TUI_EVENT_FILES_CHANGED | TUI_EVENT_STATUS_LINE_CHANGED);
 		break;
 
 	case '?':
@@ -1299,27 +1357,6 @@ tui_feed_key(int c)
 			execlp("man", "man", "muck.1", NULL);
 			_exit(EXIT_FAILURE);
 		}
-		break;
-
-	case CONTROL('L'):
-		tui_dismiss_msg();
-		clear();
-		tui_notify(TUI_EVENT_FILES_CHANGED | TUI_EVENT_STATUS_LINE_CHANGED);
-		break;
-
-	case CONTROL('M'):
-	{
-		File *f = files_seek(0, SEEK_CUR);
-		if (!f)
-			break;
-
-		int old_live = live;
-		files_set_live(1);
-		tui_select(f);
-		files_set_live(old_live);
-
-		player_pause(0);
-	}
 		break;
 
 	case 'Z': /* Zzz. */
@@ -1338,9 +1375,8 @@ tui_feed_key(int c)
 		break;
 	}
 
-	if ('0' == number_cmd[live]) {
-		number_cmd[live] = '\0';
-		cur_number[live] = 0;
+	if (has_number()) {
+		cur_number = -1;
 		tui_notify(TUI_EVENT_STATUS_LINE_CHANGED);
 	}
 }
@@ -1448,8 +1484,10 @@ tui_run(void)
 		if (rc <= 0 || (~POLLIN & pollfd.revents))
 			exit(EXIT_SUCCESS);
 
-		for (int key; ERR != (key = getch());)
+		tui_dismiss_msg();
+		for (int key; ERR != (key = getch());) {
 			tui_feed_key(key);
+		}
 	}
 }
 

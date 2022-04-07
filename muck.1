@@ -66,7 +66,7 @@ Execute initial search query.
 Execute
 .I COMMAND
 at startup. Default:
-.BR s " (begin playing from the first file)."
+.BR 0G " (begin playing from the first file)."
 .
 .TP
 .BI \-a\  FILTERGRAPH
@@ -133,8 +133,9 @@ in the search screen.
 .BI \-v
 Print version information and exit.
 .
-.SH KEYBINDINGS
+.SH KEY BINDINGS
 .SS Live mode
+Live mode is the default.
 .TP
 .BR 0\-9
 Set
@@ -152,15 +153,6 @@ Seek to
 .IR N "th (default: 1) next file."
 .
 .TP
-.BR s
-Seek to
-.IR N "th (default: 0) file."
-.
-.TP
-.BR r
-Seek to a random file (other than the currently playing file).
-.
-.TP
 .BR g ,\  Home
 Seek to
 .IR N "=MMSS (default: 0)."
@@ -172,28 +164,37 @@ both seek to 1 minute.
 .TP
 .BR G ,\  End
 Seek to
-.IR N "% (default: 1/\[*F]\[S2]\[~=]3/8=37.5%)"
-in the file.
+.IR N "th (default: last) file"
 .
 .TP
-.BR j ,\  k
-Seek by 5% but at least 5 seconds.
+.BR r
+Seek to a random file (other than the currently playing
+file).
+.
+.TP
+.BR Ctrl+f ,\  Ctrl+b ,\  PageDown ,\  PageUp
+Move selection by pages.
+.
+.TP
+.BR Ctrl+d ,\  Ctrl+u
+Move selection by half pages.
+.
+.TP
+.BR Return
+Seek again. Seek command to be repeated is displayed at
+the left of the status line.
+.
+.TP
+.BR e ,\  b
+Seek by 1 and -2 seconds, respectively.
 .
 .TP
 .BR h ,\  l ,\  Left ,\  Right
 Seek by 5 seconds.
 .
 .TP
-.BR Return
-Seek again. Seek command to be repeated is displayed in the status line.
-.
-.TP
-.BR + ,\  \-
-Change
-.B volume
-property of
-.B volume
-filter by +1% and -2%, respectively.
+.BR j ,\  k
+Seek by 5% but at least 5 seconds.
 .
 .TP
 .BR *
@@ -204,41 +205,71 @@ if given, otherwise toggle mute. Uses
 filter.
 .
 .TP
+.BR + ,\  \-
+Change
+.B volume
+property of
+.B volume
+filter by +1% and -2%, respectively.
+.
+.TP
+.BR t
+Switch audio track. When multiple tracks are available it
+is shown in the status line (rare).
+.
+.TP
 .BR .
 Pause playback.
 .
 .TP
-.BR > ,\  c
+.BR >
 Unpause playback.
 .
 .TP
-.B Space
+.BR Space ,\  c
 Toggle pause playback.
 .
 .TP
-.BR t
-Switch audio track. When multiple tracks are available it is show in the status
-line.
+.BR f ,\  /
+Search files. See "SEARCHING".
 .
 .TP
-.BR i
-Toggle show stream information.
+.BR F
+Reset search filter.
 .
 .TP
-.BR /
-Search. See `SEARCHING'.
+.BR A
+Search for "a", i.e. get songs from current artist.
+.
+.TP
+.BR B
+Search for "a A", i.e. get current album.
+.
+.TP
+.BR T
+Search for "a t", i.e. get versions of current song.
 .
 .TP
 .BR o ,\  =
-Sort. See `SORTING'.
+Sort files. See "SORTING".
+.
+.TP
+.BR O
+Disable sorting (empty sort specifier).
+.
+.TP
+.BR I
+Sort by "i=p".
+.
+.TP
+.BR J ,\  K
+Move file by 1 step or move to
+.IR N "th position"
+when given.
 .
 .TP
 .B |
 Print files to standard output.
-.
-.TP
-.B v
-Switch between live and visual modes. Live mode is the default.
 .
 .TP
 .BR H ,\  L ,\  Shift+Left ,\  Shift+Right
@@ -249,16 +280,24 @@ Scroll file list horizontally.
 Toggle column widening. Ignore narrow columns (\[<=]10 cells).
 .
 .TP
-.BR Ctrl+L
-Refresh screen.
+.B v
+Switch between live and visual modes.
 .
 .TP
-.BR q ,\  Z
-Quit.
+.BR i
+Toggle show stream information.
+.
+.TP
+.BR Ctrl+L
+Clear error message, if any, otherwise refresh screen.
 .
 .TP
 .BR ? ,\  F1
 Open manual.
+.
+.TP
+.BR q ,\  Z
+Quit.
 .
 .TP
 (other letter)
@@ -269,9 +308,8 @@ Execute
 environment variables are set, based on the currently playing file.
 .
 .SS Visual mode
-.TP
-.BR p ,\  Down ,\  N ,\  n ,\  Up ,\  s ,\  r ,\  / ,\  =
-Same as in live mode but do not start playing.
+Key bindings are mostly the same as in live mode, except
+selection does not start playing after seeking.
 .
 .TP
 .BR Return
@@ -280,20 +318,11 @@ Start playing current file.
 .TP
 .BR j ,\  k
 Move selection by
-.I N
-(default: 1).
+.IR N " (default: 1) steps."
 .
 .TP
 .BR g ,\  Home
 Go to top.
-.
-.TP
-.BR G ,\  End
-Go to bottom.
-.
-.TP
-(other)
-Same as in live mode.
 .
 .SH SEARCHING
 A temporary file is opened and shown for edit. All lines but the first one is
@@ -478,7 +507,7 @@ v~'(b|a)'@Correct.
 .TE
 .
 .SH SORTING
-See `SEARCHING'.
+See "SEARCHING".
 .P
 .I FIRST-LINE
 :=

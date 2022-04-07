@@ -104,7 +104,7 @@ main(int argc, char *argv[])
 
 	error_ok_or_die(&error, "Could not initalize globals");
 
-	char const *startup_cmd = "s";
+	char const *startup_cmd = "0G";
 	char const *codec = "pcm";
 	char const *format_name = "alsa";
 	char const *filename = NULL;

@@ -397,10 +397,17 @@ files_get_order(void)
 }
 
 void
+files_reset_order(void)
+{
+	files_set_order((char *)DEFAULT_SORT_SPEC);
+}
+
+void
 files_set_order(char *spec)
 {
 	if (!strcmp(spec, sort_spec[live])) {
-		free(spec);
+		if (DEFAULT_SORT_SPEC != spec)
+			free(spec);
 		return;
 	}
 
@@ -433,22 +440,7 @@ files_set_filter(ExprParserContext *parser, char const *s)
 }
 
 File *
-files_seek_rnd(int whence)
-{
-	files_do_filtersort();
-
-	uint8_t filter_index = cur_filter[live];
-	int32_t n = nfiles[filter_index];
-	n -= (SEEK_CUR == whence);
-	if (n <= 0)
-		return NULL;
-
-	int32_t pos = rnd_nextn(&rnd, n);
-	return files_seek(pos, whence);
-}
-
-File *
-files_seek(int32_t pos, int whence)
+files_seek_wrap(int32_t pos, int whence, int wrap)
 {
 	files_do_filtersort();
 
@@ -476,11 +468,36 @@ files_seek(int32_t pos, int whence)
 		abort();
 	}
 
-	pos %= n;
-	if (pos < 0)
-		pos += n;
+	if (wrap) {
+		pos %= n;
+		if (pos < 0)
+			pos += n;
+	} else {
+		pos = MAXMIN(0, pos, n - 1);
+	}
 
 	return files[pos];
+}
+
+File *
+files_seek(int32_t pos, int whence)
+{
+	return files_seek_wrap(pos, whence, 1);
+}
+
+File *
+files_seek_rnd(int whence)
+{
+	files_do_filtersort();
+
+	uint8_t filter_index = cur_filter[live];
+	int32_t n = nfiles[filter_index];
+	n -= (SEEK_CUR == whence);
+	if (n <= 0)
+		return NULL;
+
+	int32_t pos = rnd_nextn(&rnd, n);
+	return files_seek(pos, whence);
 }
 
 void
@@ -497,6 +514,40 @@ void
 files_select(File const *f)
 {
 	sel = f->index[live];
+}
+
+int
+files_move(File const *f, int32_t pos, int whence)
+{
+	int32_t src = f->index[live];
+	int32_t dst;
+	switch (whence) {
+	case SEEK_CUR:
+		dst = src + pos;
+		break;
+
+	case SEEK_SET:
+		dst = pos;
+		break;
+
+	default:
+		abort();
+	}
+
+	if (src == dst ||
+	    !(0 <= dst && dst < nfiles[cur_filter[live]]))
+		return 0;
+
+	files_reset_order();
+
+	SWAP(File *, files[src], files[dst]);
+	files[src]->index[live] = src;
+	files[dst]->index[live] = dst;
+
+	if (src == sel)
+		sel = dst;
+
+	return 1;
 }
 
 void
