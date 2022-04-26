@@ -18,7 +18,7 @@ error_reset(Error *error)
 }
 
 int
-error_is_ok(Error *error)
+error_is_ok(Error const *error)
 {
 	return !error->msg;
 }

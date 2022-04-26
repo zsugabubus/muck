@@ -7,7 +7,7 @@ typedef struct Error {
 } Error;
 
 void error_reset(Error *error);
-int error_is_ok(Error *error);
+int error_is_ok(Error const *error);
 
 void error_setf(Error *error, char const *msg, ...);
 void error_setf_strerror(Error *error, char const *msg, ...);
