@@ -456,7 +456,7 @@ input_write_cover(PlayerInput const *in)
 	if (data_size <= 0) {
 		static uint8_t const DEFAULT_COVER[] =
 		{
-#include "cover.h"
+#include "cover.png.h"
 		};
 
 		data = DEFAULT_COVER;

@@ -57,14 +57,15 @@ config.set10('WITH_ICU', icu_dep.found())
 
 configure_file(output: 'config.h', configuration: config)
 
-# Image was taken from https://github.com/mathiasbynens/small.
-cover = custom_target(
-	'default cover',
-	input: 'cover.png',
-	output: 'cover.h',
-	command: ['hexdump', '-ve', '/1 "%u,"', '--', '@INPUT0@'],
+include_bytes_gen = generator(
+	find_program('hexdump'),
+	output: '@PLAINNAME@.h',
+	arguments: ['-ve', '/1 "%u,"', '--', '@INPUT@'],
 	capture: true,
 )
+
+# Image was taken from https://github.com/mathiasbynens/small.
+cover_png_h = include_bytes_gen.process('cover.png')
 
 muck_deps = [
 	ffmpeg_dep,
@@ -74,26 +75,28 @@ muck_deps = [
 	dependency('libpcre2-8'),
 ]
 
-src = [
+srcs = [
+
+	'env.c',
+	'error.c',
+	'expr.c',
 	'fdata.c',
 	'file.c',
 	'files.c',
 	'files_par.c',
 	'player.c',
 	'playlist.c',
-	'tmpf.c',
 	'rnd.c',
-	'env.c',
-	'error.c',
+	'tmpf.c',
 	'tui.c',
-	'expr.c',
+
+	cover_png_h,
 
 ]
 
 executable('muck',
 	'muck.c',
-	src,
-	cover,
+	srcs,
 	dependencies: muck_deps,
 	install: true,
 )
@@ -114,7 +117,7 @@ test_env = [
 test('unit',
 	executable('unit_test',
 		'tests/unit_test.c',
-		src,
+		srcs,
 		dependencies: muck_deps
 	),
 	is_parallel: false,
