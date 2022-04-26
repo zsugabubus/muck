@@ -48,7 +48,8 @@ static char user_msg[2][128];
 static uint8_t user_msg_rd;
 static BirdLock user_msg_lock;
 
-static char const *column_spec = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoOm*z";
+static char const DEFAULT_COLUMN_SPEC[] = "iy30a,x25A+Fd*20Tn*40t+f+vlgbIB*LCoOm*z";
+static char *column_spec = (char *)DEFAULT_COLUMN_SPEC;
 
 static pthread_t tui_thread;
 
@@ -1492,7 +1493,16 @@ tui_run(void)
 }
 
 void
-tui_set_columns(char const *spec)
+tui_set_columns(char *spec)
 {
+	if (DEFAULT_COLUMN_SPEC != column_spec)
+		free(column_spec);
 	column_spec = spec;
+	tui_notify(TUI_EVENT_FILES_CHANGED);
+}
+
+char const *
+tui_get_columns(void)
+{
+	return column_spec;
 }

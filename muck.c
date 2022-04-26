@@ -151,7 +151,13 @@ main(int argc, char *argv[])
 			break;
 
 		case 'C':
-			tui_set_columns(optarg);
+		{
+			char *s = strdup(optarg);
+			if (!s)
+				error_from_errno(&error);
+			error_ok_or_die(&error, "invalid argument for 'C'");
+			tui_set_columns(s);
+		}
 			break;
 
 		case 's':

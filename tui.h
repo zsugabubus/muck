@@ -19,7 +19,8 @@ void tui_run(void);
 void tui_feed_key(int c);
 void tui_feed_keys(char const *s);
 
-void tui_set_columns(char const *spec);
+void tui_set_columns(char *spec);
+char const *tui_get_columns(void);
 
 void tui_notify(enum TUIEvent event);
 void tui_player_notify(enum PlayerEvent event);
