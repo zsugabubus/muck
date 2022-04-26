@@ -1,21 +1,19 @@
 #include <locale.h>
 #include <unistd.h>
 
-#include "files.h"
-#include "player.h"
-#include "tui.h"
-#include "expr.h"
-#include "file.h"
-#include "playlist.h"
-#include "env.h"
-
-#include "config.h"
-#include "playlist.h"
-
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
 #include <libavfilter/avfilter.h>
 #include <libavformat/avformat.h>
+
+#include "config.h"
+#include "env.h"
+#include "expr.h"
+#include "file.h"
+#include "files.h"
+#include "player.h"
+#include "playlist.h"
+#include "tui.h"
 
 #define FEATURES \
 	/* xmacro(flag, name) */ \
