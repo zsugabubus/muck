@@ -14,10 +14,12 @@
 #include <unistd.h>
 
 #include "birdlock.h"
+#include "config.h"
 #include "env.h"
 #include "expr.h"
 #include "fdata.h"
 #include "files.h"
+#include "lua.h"
 #include "playlist.h"
 #include "tmpf.h"
 #include "tui.h"
@@ -747,10 +749,15 @@ handle_signotify(int sig)
 	}
 
 	if (TUI_EVENT_EOF_REACHED & got_events) {
+#if WITH_LUA
+		if (!l_hook_on_eof())
+#endif
+	{
 		int old_live = live;
 		files_set_live(1);
 		tui_feed_key(CONTROL('M'));
 		files_set_live(old_live);
+	}
 	}
 
 	if (((TUI_EVENT_FILES_CHANGED | TUI_EVENT_STATUS_LINE_CHANGED) & got_events) &&
@@ -1492,6 +1499,12 @@ tui_run(void)
 
 		tui_dismiss_msg();
 		for (int key; ERR != (key = getch());) {
+#if WITH_LUA
+			char const *keystr = keyname(key);
+			if (l_hook_on_key(keystr))
+				continue;
+#endif
+
 			tui_feed_key(key);
 		}
 	}

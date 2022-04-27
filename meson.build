@@ -29,6 +29,8 @@ ffmpeg_dep = declare_dependency(
 
 icu_dep = dependency('icu-i18n', required: get_option('unicode'))
 
+lua_dep = dependency('lua', required: get_option('lua'))
+
 config = configuration_data()
 cc = meson.get_compiler('c')
 
@@ -53,6 +55,8 @@ endforeach
 
 config.set10('CONFIG_VALGRIND', get_option('buildtype').contains('debug'))
 
+config.set10('WITH_LUA', lua_dep.found())
+
 config.set10('WITH_ICU', icu_dep.found())
 
 configure_file(output: 'config.h', configuration: config)
@@ -64,15 +68,26 @@ include_bytes_gen = generator(
 	capture: true,
 )
 
+lua_srcs = []
+if lua_dep.found()
+	lua_srcs = [
+		'lua.c',
+		include_bytes_gen.process('muck.lua')
+	]
+endif
+
 # Image was taken from https://github.com/mathiasbynens/small.
 cover_png_h = include_bytes_gen.process('cover.png')
 
 muck_deps = [
+
+	cc.find_library('m'),
+	dependency('libpcre2-8'),
+	dependency('ncursesw'),
 	ffmpeg_dep,
 	icu_dep,
-	cc.find_library('m'),
-	dependency('ncursesw'),
-	dependency('libpcre2-8'),
+	lua_dep,
+
 ]
 
 srcs = [
@@ -91,6 +106,7 @@ srcs = [
 	'tui.c',
 
 	cover_png_h,
+	lua_srcs,
 
 ]
 

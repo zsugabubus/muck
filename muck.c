@@ -11,13 +11,15 @@
 #include "expr.h"
 #include "file.h"
 #include "files.h"
+#include "lua.h"
 #include "player.h"
 #include "playlist.h"
 #include "tui.h"
 
 #define FEATURES \
 	/* xmacro(flag, name) */ \
-	xmacro(WITH_ICU, "icu")
+	xmacro(WITH_ICU, "icu") \
+	xmacro(WITH_LUA, "lua") \
 
 #define FEATURE_HAVE0 "-"
 #define FEATURE_HAVE1 "+"
@@ -37,6 +39,9 @@ bye(void)
 	playlists_save(&error);
 
 #if CONFIG_VALGRIND
+# if WITH_LUA
+	l_destroy();
+# endif
 	player_destroy();
 	files_destroy();
 	expr_global_uninit();
@@ -194,6 +199,10 @@ main(int argc, char *argv[])
 		default:
 			return EXIT_FAILURE;
 		}
+
+#if WITH_LUA
+	l_open();
+#endif
 
 	player_configure(format_name, filename, codec, graph_descr);
 
