@@ -155,7 +155,7 @@ static uint16_t buffer_reap;
 static int64_t _Atomic ALIGNED_ATOMIC cur_pts, cur_duration;
 static atomic_uchar ALIGNED_ATOMIC paused;
 
-static PlayerInput in0 = PLAYER_INPUT_INITIALIZER;
+static PlayerInput in = PLAYER_INPUT_INITIALIZER;
 static PlayerStream out = PLAYER_STREAM_INITIALIZER;
 
 static AVFilterGraph *graph;
@@ -309,9 +309,9 @@ update_source_info(void)
 
 	int n = sizeof source_info.buf[0];
 
-	print_stream(&buf, &n, &in0.s, 0);
-	if (in0.cover_front) {
-		AVCodecParameters *pars = in0.cover_front->codecpar;
+	print_stream(&buf, &n, &in.s, 0);
+	if (in.cover_front) {
+		AVCodecParameters *pars = in.cover_front->codecpar;
 		if (pars)
 			sbprintf(&buf, &n, "; cover_front(%s), %dx%d",
 					avcodec_get_name(pars->codec_id),
@@ -402,38 +402,38 @@ graph_close(void)
 }
 
 static void
-input_close(PlayerInput *in)
+input_close(void)
 {
-	if (in->s.codec_ctx)
-		avcodec_free_context(&in->s.codec_ctx);
-	if (in->s.format_ctx) {
-		avio_closep(&in->s.format_ctx->pb);
-		avformat_close_input(&in->s.format_ctx);
+	if (in.s.codec_ctx)
+		avcodec_free_context(&in.s.codec_ctx);
+	if (in.s.format_ctx) {
+		avio_closep(&in.s.format_ctx->pb);
+		avformat_close_input(&in.s.format_ctx);
 	}
-	if (0 <= in->fd)
-		close(in->fd);
+	if (0 <= in.fd)
+		close(in.fd);
 }
 
 static void
-input_destroy(PlayerInput *in)
+input_destroy(void)
 {
-	input_close(in);
+	input_close();
 
 	for (int i = 0; i < 2; ++i) {
-		PlayerSeekEvent *e = &in->seek_event[i];
+		PlayerSeekEvent *e = &in.seek_event[i];
 		free(e->url);
 		if (0 <= e->dirfd)
 			close(e->dirfd);
 	}
 
 	for (int i = 0; i < 2; ++i) {
-		PlayerMetadataEvent *e = &in->metadata_event[i];
+		PlayerMetadataEvent *e = &in.metadata_event[i];
 		av_dict_free(&e->metadata);
 	}
 }
 
 static void
-input_write_cover(PlayerInput const *in)
+input_write_cover(void)
 {
 	char tmp[PATH_MAX];
 	if (safe_sprintf(tmp, "%s~", cover_path) < 0)
@@ -446,7 +446,7 @@ input_write_cover(PlayerInput const *in)
 	uint8_t const *data;
 	int data_size = 0;
 
-	AVStream const *stream = in->cover_front;
+	AVStream const *stream = in.cover_front;
 	if (stream) {
 		AVPacket const *pic = &stream->attached_pic;
 		data = pic->data;
@@ -471,15 +471,15 @@ input_write_cover(PlayerInput const *in)
 }
 
 static void
-update_metadata(PlayerInput *in)
+update_metadata(void)
 {
-	PlayerMetadataEvent *e = &in->metadata_event[
-		birdlock_wr_acquire(&in->metadata_lock)
+	PlayerMetadataEvent *e = &in.metadata_event[
+		birdlock_wr_acquire(&in.metadata_lock)
 	];
 
-	e->f = in->f;
+	e->f = in.f;
 
-	AVCodecContext *codec_ctx = in->s.codec_ctx;
+	AVCodecContext *codec_ctx = in.s.codec_ctx;
 	e->sample_rate = codec_ctx ? codec_ctx->sample_rate : 0;
 	e->codec_name = codec_ctx ? codec_ctx->codec->name : NULL;
 	av_channel_layout_uninit(&e->ch_layout);
@@ -488,11 +488,11 @@ update_metadata(PlayerInput *in)
 		(void)av_channel_layout_copy(&e->ch_layout, &codec_ctx->ch_layout);
 
 	AVCodecParameters *pars =
-		in->cover_front ? in->cover_front->codecpar : NULL;
+		in.cover_front ? in.cover_front->codecpar : NULL;
 	e->cover_codec_id = pars ? pars->codec_id : AV_CODEC_ID_NONE;
 	e->cover_width = pars ? pars->width : 0;
 
-	AVFormatContext *format_ctx = in->s.format_ctx;
+	AVFormatContext *format_ctx = in.s.format_ctx;
 	e->duration = format_ctx ? format_ctx->duration : 0;
 	av_dict_free(&e->metadata);
 	if (format_ctx) {
@@ -503,40 +503,40 @@ update_metadata(PlayerInput *in)
 	}
 
 	struct stat st;
-	if (0 <= in->fd && 0 <= fstat(in->fd, &st))
+	if (0 <= in.fd && 0 <= fstat(in.fd, &st))
 		e->mtime = st.st_mtime;
 	else
 		e->mtime = 0;
 
-	birdlock_wr_release(&in->metadata_lock);
+	birdlock_wr_release(&in.metadata_lock);
 	tui_player_notify(PLAYER_EVENT_METADATA_CHANGED);
 }
 
 static void
-input_open(PlayerInput *in, PlayerSeekEvent *e)
+input_open(PlayerSeekEvent *e)
 {
-	memset(&in->s, 0, sizeof in->s);
+	memset(&in.s, 0, sizeof in.s);
 
 	char const *url;
 	char urlbuf[sizeof "pipe:" + 10];
 
 	if (F_URL == e->type) {
-		in->fd = -1;
+		in.fd = -1;
 		url = e->url;
 	} else {
-		in->fd = openat(e->dirfd, e->url, O_CLOEXEC | O_RDONLY);
-		if (in->fd < 0) {
+		in.fd = openat(e->dirfd, e->url, O_CLOEXEC | O_RDONLY);
+		if (in.fd < 0) {
 			tui_msgf("Cannot open '%s': %s", e->url, strerror(errno));
 			return;
 		}
 
-		sprintf(urlbuf, "pipe:%d", in->fd);
+		sprintf(urlbuf, "pipe:%d", in.fd);
 		url = urlbuf;
 	}
 
 	int rc;
 
-	rc = avformat_open_input(&in->s.format_ctx, url, NULL, NULL);
+	rc = avformat_open_input(&in.s.format_ctx, url, NULL, NULL);
 	if (rc < 0) {
 		char error_buf[AV_ERROR_MAX_STRING_SIZE];
 		av_make_error_string(error_buf, sizeof error_buf, rc);
@@ -545,21 +545,21 @@ input_open(PlayerInput *in, PlayerSeekEvent *e)
 	}
 
 	/* Get information on the input file (number of streams etc.). */
-	(void)avformat_find_stream_info(in->s.format_ctx, NULL);
+	(void)avformat_find_stream_info(in.s.format_ctx, NULL);
 
-	in->cover_front = NULL;
-	in->s.audio = NULL;
+	in.cover_front = NULL;
+	in.s.audio = NULL;
 
 	unsigned ntracks = 0;
 
-	for (unsigned i = 0; i < in->s.format_ctx->nb_streams; ++i) {
-		AVStream *stream = in->s.format_ctx->streams[i];
+	for (unsigned i = 0; i < in.s.format_ctx->nb_streams; ++i) {
+		AVStream *stream = in.s.format_ctx->streams[i];
 
 		stream->discard = AVDISCARD_ALL;
 
 		if (AVMEDIA_TYPE_AUDIO == stream->codecpar->codec_type) {
 			if (e->track == ntracks)
-				in->s.audio = stream;
+				in.s.audio = stream;
 			++ntracks;
 			continue;
 		}
@@ -573,26 +573,26 @@ input_open(PlayerInput *in, PlayerSeekEvent *e)
 				title = av_dict_get(stream->metadata, "MATROSKA/TITLE", NULL, 0);
 			if (!title || strcasecmp(title->value, "Cover (front)"))
 				continue;
-			in->cover_front = stream;
+			in.cover_front = stream;
 		}
 	}
 
-	atomic_store_lax(&in->ntracks, ntracks);
+	atomic_store_lax(&in.ntracks, ntracks);
 
-	if (!in->s.audio) {
+	if (!in.s.audio) {
 		tui_msgf("No audio streams found");
 		return;
 	}
 
 #if 0
-	AVStream *default_stream = in->s.format_ctx->streams[av_find_default_stream_index(in->s.format_ctx)];
+	AVStream *default_stream = in.s.format_ctx->streams[av_find_default_stream_index(in.s.format_ctx)];
 	if (default_stream->opaque)
-		in->s.audio = default_stream;
+		in.s.audio = default_stream;
 #endif
 
-	in->s.audio->discard = 0;
+	in.s.audio->discard = 0;
 
-	AVCodecParameters const *pars = in->s.audio->codecpar;
+	AVCodecParameters const *pars = in.s.audio->codecpar;
 	/* Find a decoder for the audio stream. */
 	AVCodec const *codec = avcodec_find_decoder(pars->codec_id);
 	if (!codec) {
@@ -602,21 +602,21 @@ input_open(PlayerInput *in, PlayerSeekEvent *e)
 	}
 
 	/* Allocate a new decoding context. */
-	if (!(in->s.codec_ctx = avcodec_alloc_context3(codec))) {
+	if (!(in.s.codec_ctx = avcodec_alloc_context3(codec))) {
 		tui_msgf("Cannot allocate codec");
 		return;
 	}
 
 	/* Initialize the stream parameters with demuxer information. */
-	rc = avcodec_parameters_to_context(in->s.codec_ctx, pars);
+	rc = avcodec_parameters_to_context(in.s.codec_ctx, pars);
 	if (rc < 0) {
 		tui_msg_averror("Cannot initalize codec parameters", rc);
 		return;
 	}
 
-	in->s.codec_ctx->time_base = in->s.audio->time_base;
+	in.s.codec_ctx->time_base = in.s.audio->time_base;
 
-	rc = avcodec_open2(in->s.codec_ctx, codec, NULL);
+	rc = avcodec_open2(in.s.codec_ctx, codec, NULL);
 	if (rc < 0) {
 		tui_msg_averror("Cannot open codec", rc);
 		return;
@@ -853,24 +853,24 @@ source_worker(void *arg)
 			goto terminate;
 #endif
 
-		if (likely(!birdlock_rd_test(&in0.seek_lock)))
+		if (likely(!birdlock_rd_test(&in.seek_lock)))
 			goto no_event;
 
-		PlayerSeekEvent *e = &in0.seek_event[
-			birdlock_rd_acquire(&in0.seek_lock)
+		PlayerSeekEvent *e = &in.seek_event[
+			birdlock_rd_acquire(&in.seek_lock)
 		];
 
 		if (e->url) {
-			input_close(&in0);
+			input_close();
 
-			in0.f = e->f;
-			input_open(&in0, e);
-			input_write_cover(&in0);
+			in.f = e->f;
+			input_open(e);
+			input_write_cover();
 			update_source_info();
-			update_metadata(&in0);
+			update_metadata();
 
 			/* Otherwise would be noise. */
-			if (!in0.s.codec_ctx)
+			if (!in.s.codec_ctx)
 				goto eof_reached;
 
 			flush_output = S_STALLED != state;
@@ -879,7 +879,7 @@ source_worker(void *arg)
 			buffer_high = atomic_load_lax(&buffer_bytes_max);
 		}
 
-		if (likely(in0.s.codec_ctx)) {
+		if (likely(in.s.codec_ctx)) {
 			int64_t target_pts = e->ts;
 			switch (e->whence) {
 			case SEEK_SET:
@@ -910,8 +910,8 @@ source_worker(void *arg)
 			state = S_RUNNING;
 
 			target_pts = av_rescale(target_pts,
-					in0.s.audio->time_base.den,
-					in0.s.audio->time_base.num);
+					in.s.audio->time_base.den,
+					in.s.audio->time_base.num);
 
 			if (seek_buffer(target_pts))
 				goto wakeup_sink;
@@ -920,8 +920,8 @@ source_worker(void *arg)
 
 			/* Maybe interesting: out.codec_ctx->delay. */
 
-			avcodec_flush_buffers(in0.s.codec_ctx);
-			rc = avformat_seek_file(in0.s.format_ctx, in0.s.audio->index,
+			avcodec_flush_buffers(in.s.codec_ctx);
+			rc = avformat_seek_file(in.s.format_ctx, in.s.audio->index,
 					0, target_pts, target_pts, 0);
 			if (rc < 0)
 				tui_msg_averror("Cannot seek", rc);
@@ -949,7 +949,6 @@ source_worker(void *arg)
 			{
 			eof_reached:;
 				state = S_STALLED;
-				/* TODO: Seek commands should fill in1 first. */
 				tui_player_notify(PLAYER_EVENT_EOF_REACHED);
 			}
 
@@ -981,9 +980,7 @@ source_worker(void *arg)
 			buffer[buffer_tail] = frame;
 		}
 
-		PlayerInput *in = &in0;
-
-		rc = av_read_frame(in->s.format_ctx, pkt);
+		rc = av_read_frame(in.s.format_ctx, pkt);
 		if (unlikely(state = rc < 0 ? S_STOPPED : S_RUNNING)) {
 			if (AVERROR_EOF != rc)
 				tui_msg_averror("Cannot read frame", rc);
@@ -991,27 +988,27 @@ source_worker(void *arg)
 		}
 
 		/* Packet from an uninteresting stream. */
-		if (unlikely(in->s.audio->index != pkt->stream_index)) {
+		if (unlikely(in.s.audio->index != pkt->stream_index)) {
 			av_packet_unref(pkt);
 			continue;
 		}
 
-		if (unlikely((AVSTREAM_EVENT_FLAG_METADATA_UPDATED & in->s.format_ctx->event_flags))) {
-			in->s.format_ctx->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
+		if (unlikely((AVSTREAM_EVENT_FLAG_METADATA_UPDATED & in.s.format_ctx->event_flags))) {
+			in.s.format_ctx->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
 			/* Metadata may be moved out on open. Update only if
 			 * there is something here. */
-			if (in->s.format_ctx->metadata)
-				update_metadata(in);
+			if (in.s.format_ctx->metadata)
+				update_metadata();
 		}
 
 		/* Send read packet for decoding. */
-		rc = avcodec_send_packet(in->s.codec_ctx, pkt);
+		rc = avcodec_send_packet(in.s.codec_ctx, pkt);
 		av_packet_unref(pkt);
 		if (unlikely(rc < 0))
 			continue;
 
 		/* Receive decoded frame. */
-		rc = avcodec_receive_frame(in->s.codec_ctx, frame);
+		rc = avcodec_receive_frame(in.s.codec_ctx, frame);
 		if (unlikely(rc < 0))
 			continue;
 
@@ -1019,15 +1016,15 @@ source_worker(void *arg)
 
 		/* Unused by FFmpeg. */
 		frame->pts = av_rescale(frame->pts,
-				in->s.audio->time_base.num,
-				in->s.audio->time_base.den);
+				in.s.audio->time_base.num,
+				in.s.audio->time_base.den);
 		frame->opaque = (void *)(size_t)flush_output;
 		flush_output = 0;
 
 		atomic_store_lax(&cur_duration,
-				AV_NOPTS_VALUE == in0.s.format_ctx->duration
+				AV_NOPTS_VALUE == in.s.format_ctx->duration
 					? frame->pts
-					: av_rescale(in0.s.format_ctx->duration, 1, AV_TIME_BASE));
+					: av_rescale(in.s.format_ctx->duration, 1, AV_TIME_BASE));
 
 		int was_empty =
 			atomic_load_lax(&buffer_head) ==
@@ -1244,7 +1241,7 @@ player_run(Error *error)
 File *
 player_get_file(void)
 {
-	return in0.seek_f;
+	return in.seek_f;
 }
 
 void
@@ -1252,11 +1249,11 @@ player_seek_file(File const *f, int64_t ts, unsigned track)
 {
 	assert(f);
 
-	PlayerSeekEvent *e = &in0.seek_event[
-		birdlock_wr_acquire(&in0.seek_lock)
+	PlayerSeekEvent *e = &in.seek_event[
+		birdlock_wr_acquire(&in.seek_lock)
 	];
 
-	in0.seek_f = (File *)f;
+	in.seek_f = (File *)f;
 	e->f = (File *)f;
 	Playlist *playlist = file_get_playlist(f);
 	e->type = f->type;
@@ -1267,15 +1264,15 @@ player_seek_file(File const *f, int64_t ts, unsigned track)
 	e->whence = SEEK_SET;
 	e->ts = ts;
 
-	birdlock_wr_release(&in0.seek_lock);
+	birdlock_wr_release(&in.seek_lock);
 	player_signal(&source_signal);
 }
 
 void
 player_seek(int64_t ts, int whence)
 {
-	PlayerSeekEvent *e = &in0.seek_event[
-		birdlock_wr_acquire(&in0.seek_lock)
+	PlayerSeekEvent *e = &in.seek_event[
+		birdlock_wr_acquire(&in.seek_lock)
 	];
 
 	int same_file = e->f == player_get_file();
@@ -1289,7 +1286,7 @@ player_seek(int64_t ts, int whence)
 	e->url = NULL;
 	e->f = player_get_file();
 
-	birdlock_wr_release(&in0.seek_lock);
+	birdlock_wr_release(&in.seek_lock);
 	player_signal(&source_signal);
 }
 
@@ -1311,7 +1308,7 @@ player_destroy(void)
 	xassert(!pthread_mutex_destroy(&sink_signal.lock));
 	xassert(!pthread_cond_destroy(&sink_signal.cond));
 
-	input_destroy(&in0);
+	input_destroy();
 	output_close();
 	graph_close();
 
@@ -1354,7 +1351,7 @@ player_is_paused(void)
 int
 player_get_ntracks(void)
 {
-	return atomic_load_lax(&in0.ntracks);
+	return atomic_load_lax(&in.ntracks);
 }
 
 char const *
@@ -1427,8 +1424,8 @@ player_configure(char const *format_name, char const *filename,
 PlayerMetadataEvent *
 player_get_metadata(void)
 {
-	PlayerMetadataEvent *e = &in0.metadata_event[
-		birdlock_rd_acquire(&in0.metadata_lock)
+	PlayerMetadataEvent *e = &in.metadata_event[
+		birdlock_rd_acquire(&in.metadata_lock)
 	];
 	return e->f == player_get_file() ? e : NULL;
 }
