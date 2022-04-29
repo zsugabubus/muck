@@ -138,6 +138,7 @@ static atomic_uchar ALIGNED_ATOMIC terminate;
 static int64_t _Atomic ALIGNED_ATOMIC buffer_bytes;
 static int64_t _Atomic ALIGNED_ATOMIC buffer_bytes_max = 8 /* MB */ << 20;
 static int64_t _Atomic ALIGNED_ATOMIC buffer_low; /**< When to wake up producer for more frames. */
+static int64_t const BUFFER_EOF_LOW = 128 << 10;
 
 /**
  * Producer buffer.
@@ -860,6 +861,8 @@ source_worker(void *arg)
 			birdlock_rd_acquire(&in.seek_lock)
 		];
 
+		int was_stalled = S_STALLED == state;
+
 		if (e->url) {
 			input_close();
 
@@ -873,9 +876,10 @@ source_worker(void *arg)
 			if (!in.s.codec_ctx)
 				goto eof_reached;
 
-			flush_output = S_STALLED != state;
+			flush_output = !was_stalled;
 			state = S_RUNNING;
-			seek_buffer(INT64_MIN);
+			if (flush_output)
+				seek_buffer(INT64_MIN);
 			buffer_high = atomic_load_lax(&buffer_bytes_max);
 		}
 
@@ -913,10 +917,12 @@ source_worker(void *arg)
 					in.s.audio->time_base.den,
 					in.s.audio->time_base.num);
 
-			if (seek_buffer(target_pts))
-				goto wakeup_sink;
+			if (!was_stalled) {
+				if (seek_buffer(target_pts))
+					goto wakeup_sink;
 
-			flush_output = 1;
+				flush_output = 1;
+			}
 
 			/* Maybe interesting: out.codec_ctx->delay. */
 
@@ -944,8 +950,13 @@ source_worker(void *arg)
 		wait:;
 			if (/* No more frames will arrive because decoder stopped. */
 			    S_STOPPED == state &&
-			    /* Buffer empty. */
-			    atomic_load_lax(&buffer_head) == atomic_load_lax(&buffer_tail))
+			    /* Buffer (almost) empty. */
+			    (atomic_load_lax(&buffer_bytes) <= BUFFER_EOF_LOW ||
+			     /* If last frame is larger than BUFFER_EOF_LOW,
+			      * EOF signal would be sent only when all the
+			      * buffer had been consumed. To avoid this, fire
+			      * EOF event before reaching last frame. */
+			     (uint16_t)(atomic_load_lax(&buffer_tail) - atomic_load_lax(&buffer_head)) <= 1))
 			{
 			eof_reached:;
 				state = S_STALLED;
@@ -954,6 +965,8 @@ source_worker(void *arg)
 
 			atomic_store_lax(&buffer_low, S_RUNNING == state
 					? buffer_high / 2
+					: S_STOPPED == state
+					? BUFFER_EOF_LOW
 					: 0);
 			player_wait(&source_signal);
 			continue;
