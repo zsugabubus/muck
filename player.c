@@ -237,7 +237,7 @@ seek_buffer(int64_t target_pts)
 		av_frame_unref(frame);
 	}
 
-	xassert(dropped_bytes <= atomic_fetch_sub_lax(&buffer_bytes, dropped_bytes));
+	xassert(0 <= atomic_fetch_sub_lax(&buffer_bytes, dropped_bytes) - dropped_bytes);
 
 	return found;
 }
@@ -519,7 +519,7 @@ input_open(PlayerSeekEvent *e)
 	memset(&in.s, 0, sizeof in.s);
 
 	char const *url;
-	char urlbuf[sizeof "pipe:" + 10];
+	char url_buf[sizeof "pipe:" + 10];
 
 	if (F_URL == e->type) {
 		in.fd = -1;
@@ -531,8 +531,8 @@ input_open(PlayerSeekEvent *e)
 			return;
 		}
 
-		sprintf(urlbuf, "pipe:%d", in.fd);
-		url = urlbuf;
+		sprintf(url_buf, "pipe:%d", in.fd);
+		url = url_buf;
 	}
 
 	int rc;
