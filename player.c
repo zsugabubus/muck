@@ -217,6 +217,11 @@ seek_buffer(int64_t target_pts)
 	int found = 0;
 
 	uint16_t old_head = atomic_exchange_lax(&buffer_head, buffer_tail);
+	/* Frame at head position could already been exchanged by sink
+	 * thread to NULL or to an already played frame. We cannot rely
+	 * on it so treat it as undefined and unconditionally skip it. */
+	if (old_head != buffer_tail)
+		++old_head;
 
 	int64_t dropped_bytes = 0;
 
