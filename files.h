@@ -38,6 +38,7 @@ void files_plumb(FILE *stream);
 
 void files_set_live(int new_live);
 void files_set_order(char *spec);
+void files_set_order_dup(char const *spec);
 void files_reset_order(void);
 void files_set_filter(ExprParserContext *parser, char const *s);
 

@@ -420,6 +420,17 @@ files_set_order(char *spec)
 }
 
 void
+files_set_order_dup(char const *spec)
+{
+	char *s = strdup(spec);
+	if (!s) {
+		tui_msg_oom();
+		return;
+	}
+	files_set_order(s);
+}
+
+void
 files_set_filter(ExprParserContext *parser, char const *s)
 {
 	Expr *query = parse_filter_spec(parser, s);

@@ -1281,11 +1281,11 @@ tui_feed_key(int c)
 		break;
 
 	case 'I':
-	{
-		char *s = strdup("i=p");
-		if (s)
-			files_set_order(s);
-	}
+		files_set_order_dup("i=p");
+		break;
+
+	case 'R':
+		files_set_order_dup("aTtn=");
 		break;
 
 	case 'J':
