@@ -48,7 +48,7 @@
 	 * after label. */ \
 	xmacro('C',, catalog, 15, 0) \
 	xmacro('y',, date, 10, 0) \
-	xmacro('o',, codec, 18, 0) \
+	xmacro('o',, codec, 20, 0) \
 	xmacro('O',, cover_codec, 10, 0) \
 	xmacro('m',, mtime, 10, 0) \
 	xmacro('l',, length, 6, 0) \
