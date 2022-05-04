@@ -460,6 +460,11 @@ tui_draw_files(void)
 			addch(t);
 		}
 
+		if (i + 4 < c->width) {
+			printw(" (%c)", metadata_get_id((enum MetadataX)c->m));
+			i += 4;
+		}
+
 		for (; i <= c->width; ++i)
 			addch(' ');
 	}
