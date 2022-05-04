@@ -22,6 +22,7 @@ typedef struct PlayerMetadataEvent {
 	File *f;
 	int icy;
 	char const *codec_name;
+	int bit_rate;
 	int sample_rate;
 	AVChannelLayout ch_layout;
 	enum AVCodecID cover_codec_id;

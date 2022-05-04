@@ -487,6 +487,7 @@ update_metadata(void)
 
 	AVCodecContext *codec_ctx = in.s.codec_ctx;
 	e->sample_rate = codec_ctx ? codec_ctx->sample_rate : 0;
+	e->bit_rate = codec_ctx ? codec_ctx->bit_rate : 0;
 	e->codec_name = codec_ctx ? codec_ctx->codec->name : NULL;
 	av_channel_layout_uninit(&e->ch_layout);
 	memset(&e->ch_layout, 0, sizeof e->ch_layout);
@@ -499,6 +500,8 @@ update_metadata(void)
 	e->cover_width = pars ? pars->width : 0;
 
 	AVFormatContext *format_ctx = in.s.format_ctx;
+	if (!e->bit_rate && format_ctx)
+		e->bit_rate = format_ctx->bit_rate;
 	e->duration = format_ctx ? format_ctx->duration : 0;
 	av_dict_free(&e->metadata);
 	if (format_ctx) {
